@@ -58,3 +58,9 @@ You can find the dependencies of a module by checking `LIBRARIES_TO_LINK` argume
   set(ENABLE_NETMAP_EMU OFF)
   set(ENABLE_TAPNETDEV  OFF)
   ```
+
+<br>
+<br>
+
+To speed up cmake reconfigure (when there is source file added/removed),
+`find_package/check_deps` for boost, gsl, doxygen and sphinx are skiped (Related statements are commented out in `build-support/macros-and-definitions.cmake`).
