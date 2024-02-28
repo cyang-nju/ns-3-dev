@@ -168,7 +168,7 @@ TcpLp::PktsAcked(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked, const Time& rt
 {
     NS_LOG_FUNCTION(this << tcb << segmentsAcked << rtt);
 
-    if (!rtt.IsZero())
+    if (!rtt.IsNegative())
     {
         RttSample(tcb);
     }

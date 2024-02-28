@@ -58,7 +58,7 @@ class TcpOptionSack : public TcpOption
     TypeId GetInstanceTypeId() const override;
 
     typedef std::pair<SequenceNumber32, SequenceNumber32> SackBlock; //!< SACK block definition
-    typedef std::list<SackBlock> SackList;                           //!< SACK list definition
+    typedef std::vector<SackBlock> SackList;                           //!< SACK list definition
 
     TcpOptionSack();
     ~TcpOptionSack() override;

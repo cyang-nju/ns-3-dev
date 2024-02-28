@@ -96,7 +96,7 @@ TcpWestwoodPlus::PktsAcked(Ptr<TcpSocketState> tcb, uint32_t packetsAcked, const
 {
     NS_LOG_FUNCTION(this << tcb << packetsAcked << rtt);
 
-    if (rtt.IsZero())
+    if (rtt.IsNegative())
     {
         NS_LOG_WARN("RTT measured is zero!");
         return;

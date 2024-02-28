@@ -50,7 +50,7 @@ PfifoFastQueueDisc::GetTypeId()
 }
 
 PfifoFastQueueDisc::PfifoFastQueueDisc()
-    : QueueDisc(QueueDiscSizePolicy::MULTIPLE_QUEUES, QueueSizeUnit::PACKETS)
+    : QueueDisc(QueueDiscSizePolicy::MULTIPLE_QUEUES)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -173,13 +173,13 @@ PfifoFastQueueDisc::CheckConfig()
         return false;
     }
 
-    if (GetInternalQueue(0)->GetMaxSize().GetUnit() != QueueSizeUnit::PACKETS ||
-        GetInternalQueue(1)->GetMaxSize().GetUnit() != QueueSizeUnit::PACKETS ||
-        GetInternalQueue(2)->GetMaxSize().GetUnit() != QueueSizeUnit::PACKETS)
-    {
-        NS_LOG_ERROR("PfifoFastQueueDisc needs 3 internal queues operating in packet mode");
-        return false;
-    }
+    // if (GetInternalQueue(0)->GetMaxSize().GetUnit() != QueueSizeUnit::PACKETS ||
+    //     GetInternalQueue(1)->GetMaxSize().GetUnit() != QueueSizeUnit::PACKETS ||
+    //     GetInternalQueue(2)->GetMaxSize().GetUnit() != QueueSizeUnit::PACKETS)
+    // {
+    //     NS_LOG_ERROR("PfifoFastQueueDisc needs 3 internal queues operating in packet mode");
+    //     return false;
+    // }
 
     for (uint8_t i = 0; i < 2; i++)
     {

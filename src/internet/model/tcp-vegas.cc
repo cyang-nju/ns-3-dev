@@ -104,7 +104,7 @@ TcpVegas::PktsAcked(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked, const Time&
 {
     NS_LOG_FUNCTION(this << tcb << segmentsAcked << rtt);
 
-    if (rtt.IsZero())
+    if (rtt.IsNegative())
     {
         return;
     }
@@ -126,7 +126,7 @@ TcpVegas::EnableVegas(Ptr<TcpSocketState> tcb)
     NS_LOG_FUNCTION(this << tcb);
 
     m_doingVegasNow = true;
-    m_begSndNxt = tcb->m_nextTxSequence;
+    m_begSndNxt = tcb->m_highTxMark;
     m_cntRtt = 0;
     m_minRtt = Time::Max();
 }
@@ -172,7 +172,7 @@ TcpVegas::IncreaseWindow(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked)
         NS_LOG_LOGIC("A Vegas cycle has finished, we adjust cwnd once per RTT.");
 
         // Save the current right edge for next Vegas cycle
-        m_begSndNxt = tcb->m_nextTxSequence;
+        m_begSndNxt = tcb->m_highTxMark;
 
         /*
          * We perform Vegas calculations only if we got enough RTT samples to

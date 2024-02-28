@@ -26,7 +26,8 @@
 #include "socket-factory.h"
 
 #include "ns3/log.h"
-
+#include "ns3/random-variable-stream.h"
+#include <random>
 #include <limits>
 
 namespace ns3
@@ -35,6 +36,9 @@ namespace ns3
 NS_LOG_COMPONENT_DEFINE("Socket");
 
 NS_OBJECT_ENSURE_REGISTERED(Socket);
+
+static bool g_randomInitialized = false;
+static std::mt19937 g_randomGen32;
 
 TypeId
 Socket::GetTypeId()
@@ -66,6 +70,28 @@ Socket::Socket()
 Socket::~Socket()
 {
     NS_LOG_FUNCTION(this);
+}
+
+uint32_t
+Socket::GetTxHash() const
+{
+    return m_txHash;
+}
+
+// TcpSocketBase::Connect(), TcpSocketBase::CompleteFork()
+void
+Socket::GenerateTxRandomHash()
+{
+    if (!g_randomInitialized) {
+        uint32_t seed = static_cast<uint32_t>(CreateObject<UniformRandomVariable>()->GetValue() * 65536);
+        g_randomGen32.seed(seed);
+        g_randomInitialized = true;
+    }
+    uint32_t hash = 0;
+    do {
+        hash = g_randomGen32();
+    } while (hash == 0);
+    m_txHash = hash;
 }
 
 Ptr<Socket>

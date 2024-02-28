@@ -67,15 +67,10 @@ TcpCubic::GetTypeId()
                           MakeUintegerChecker<uint32_t>())
             .AddAttribute("HyStartDetect",
                           "Hybrid Slow Start detection mechanisms:"
-                          "packet train, delay, both",
-                          EnumValue(HybridSSDetectionMode::BOTH),
-                          MakeEnumAccessor<HybridSSDetectionMode>(&TcpCubic::m_hystartDetect),
-                          MakeEnumChecker(HybridSSDetectionMode::PACKET_TRAIN,
-                                          "PACKET_TRAIN",
-                                          HybridSSDetectionMode::DELAY,
-                                          "DELAY",
-                                          HybridSSDetectionMode::BOTH,
-                                          "BOTH"))
+                          "1: packet train, 2: delay, 3: both",
+                          IntegerValue(3),
+                          MakeIntegerAccessor(&TcpCubic::m_hystartDetect),
+                          MakeIntegerChecker<int>(1, 3))
             .AddAttribute("HyStartMinSamples",
                           "Number of delay samples for detecting the increase of delay",
                           UintegerValue(8),
@@ -93,12 +88,12 @@ TcpCubic::GetTypeId()
                           MakeTimeChecker())
             .AddAttribute("HyStartDelayMax",
                           "Maximum time for hystart algorithm",
-                          TimeValue(MilliSeconds(1000)),
+                          TimeValue(MilliSeconds(16)),
                           MakeTimeAccessor(&TcpCubic::m_hystartDelayMax),
                           MakeTimeChecker())
             .AddAttribute("CubicDelta",
                           "Delta Time to wait after fast recovery before adjusting param",
-                          TimeValue(MilliSeconds(10)),
+                          TimeValue(MilliSeconds(4)),
                           MakeTimeAccessor(&TcpCubic::m_cubicDelta),
                           MakeTimeChecker())
             .AddAttribute("CntClamp",
@@ -119,50 +114,19 @@ TcpCubic::GetTypeId()
 
 TcpCubic::TcpCubic()
     : TcpCongestionOps(),
+      m_cubicDelta(Time::Min()),
       m_cWndCnt(0),
       m_lastMaxCwnd(0),
       m_bicOriginPoint(0),
       m_bicK(0.0),
-      m_delayMin(Time::Min()),
+      m_delayMin(0),
       m_epochStart(Time::Min()),
       m_found(false),
       m_roundStart(Time::Min()),
       m_endSeq(0),
       m_lastAck(Time::Min()),
-      m_cubicDelta(Time::Min()),
-      m_currRtt(Time::Min()),
+      m_currRtt(Time::Max()),
       m_sampleCnt(0)
-{
-    NS_LOG_FUNCTION(this);
-}
-
-TcpCubic::TcpCubic(const TcpCubic& sock)
-    : TcpCongestionOps(sock),
-      m_fastConvergence(sock.m_fastConvergence),
-      m_beta(sock.m_beta),
-      m_hystart(sock.m_hystart),
-      m_hystartDetect(sock.m_hystartDetect),
-      m_hystartLowWindow(sock.m_hystartLowWindow),
-      m_hystartAckDelta(sock.m_hystartAckDelta),
-      m_hystartDelayMin(sock.m_hystartDelayMin),
-      m_hystartDelayMax(sock.m_hystartDelayMax),
-      m_hystartMinSamples(sock.m_hystartMinSamples),
-      m_initialCwnd(sock.m_initialCwnd),
-      m_cntClamp(sock.m_cntClamp),
-      m_c(sock.m_c),
-      m_cWndCnt(sock.m_cWndCnt),
-      m_lastMaxCwnd(sock.m_lastMaxCwnd),
-      m_bicOriginPoint(sock.m_bicOriginPoint),
-      m_bicK(sock.m_bicK),
-      m_delayMin(sock.m_delayMin),
-      m_epochStart(sock.m_epochStart),
-      m_found(sock.m_found),
-      m_roundStart(sock.m_roundStart),
-      m_endSeq(sock.m_endSeq),
-      m_lastAck(sock.m_lastAck),
-      m_cubicDelta(sock.m_cubicDelta),
-      m_currRtt(sock.m_currRtt),
-      m_sampleCnt(sock.m_sampleCnt)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -173,6 +137,11 @@ TcpCubic::GetName() const
     return "TcpCubic";
 }
 
+void TcpCubic::Init(Ptr<TcpSocketState> tcb)
+{
+    m_betaScale = (1 + m_beta) / (3 * (1 - m_beta));
+}
+
 void
 TcpCubic::HystartReset(Ptr<const TcpSocketState> tcb)
 {
@@ -180,7 +149,7 @@ TcpCubic::HystartReset(Ptr<const TcpSocketState> tcb)
 
     m_roundStart = m_lastAck = Simulator::Now();
     m_endSeq = tcb->m_highTxMark;
-    m_currRtt = Time::Min();
+    m_currRtt = Time::Max();
     m_sampleCnt = 0;
 }
 
@@ -189,50 +158,29 @@ TcpCubic::IncreaseWindow(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked)
 {
     NS_LOG_FUNCTION(this << tcb << segmentsAcked);
 
-    if (tcb->m_cWnd < tcb->m_ssThresh)
-    {
-        if (m_hystart && tcb->m_lastAckedSeq > m_endSeq)
-        {
-            HystartReset(tcb);
-        }
-
-        // In Linux, the QUICKACK socket option enables the receiver to send
-        // immediate acks initially (during slow start) and then transition
-        // to delayed acks.  ns-3 does not implement QUICKACK, and if ack
-        // counting instead of byte counting is used during slow start window
-        // growth, when TcpSocket::DelAckCount==2, then the slow start will
-        // not reach as large of an initial window as in Linux.  Therefore,
-        // we can approximate the effect of QUICKACK by making this slow
-        // start phase perform Appropriate Byte Counting (RFC 3465)
-        tcb->m_cWnd += segmentsAcked * tcb->m_segmentSize;
-        segmentsAcked = 0;
-
-        NS_LOG_INFO("In SlowStart, updated to cwnd " << tcb->m_cWnd << " ssthresh "
-                                                     << tcb->m_ssThresh);
+    if (segmentsAcked == 0) {
+        return;
     }
 
-    if (tcb->m_cWnd >= tcb->m_ssThresh && segmentsAcked > 0)
-    {
-        m_cWndCnt += segmentsAcked;
-        uint32_t cnt = Update(tcb, segmentsAcked);
+    uint32_t cwnd = tcb->m_cWnd.Get();
+    uint32_t ssthresh = tcb->m_ssThresh.Get();
+    if (cwnd < ssthresh) {
+        cwnd = std::min(cwnd + segmentsAcked * tcb->m_segmentSize, ssthresh);
+        segmentsAcked -= (cwnd - tcb->m_cWnd.Get()) / tcb->m_segmentSize;
+        tcb->m_cWnd = cwnd;
+    }
+    if (segmentsAcked == 0) {
+        return;
+    }
 
-        /* According to RFC 6356 even once the new cwnd is
-         * calculated you must compare this to the number of ACKs received since
-         * the last cwnd update. If not enough ACKs have been received then cwnd
-         * cannot be updated.
-         */
-        if (m_cWndCnt >= cnt)
-        {
-            tcb->m_cWnd += tcb->m_segmentSize;
-            m_cWndCnt -= cnt;
-            NS_LOG_INFO("In CongAvoid, updated to cwnd " << tcb->m_cWnd);
-        }
-        else
-        {
-            NS_LOG_INFO("Not enough segments have been ACKed to increment cwnd."
-                        "Until now "
-                        << m_cWndCnt << " cnd " << cnt);
-        }
+    NS_ASSERT(segmentsAcked > 0);
+
+    m_cWndCnt += segmentsAcked;
+    uint32_t cnt = Update(tcb, segmentsAcked);
+    if (m_cWndCnt >= cnt)
+    {
+        tcb->m_cWnd += tcb->m_segmentSize;
+        m_cWndCnt -= cnt;
     }
 }
 
@@ -244,7 +192,6 @@ TcpCubic::Update(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked)
     uint32_t delta;
     uint32_t bicTarget;
     uint32_t cnt = 0;
-    uint32_t maxCnt;
     double offs;
     uint32_t segCwnd = tcb->GetCwndInSegments();
 
@@ -254,7 +201,7 @@ TcpCubic::Update(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked)
     {
         m_epochStart = Simulator::Now(); // record the beginning of an epoch
         m_ackCnt = segmentsAcked;
-        m_tcpCwnd = segCwnd;
+        m_tcpSegCwnd = segCwnd;
 
         if (m_lastMaxCwnd <= segCwnd)
         {
@@ -264,13 +211,13 @@ TcpCubic::Update(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked)
         }
         else
         {
-            m_bicK = std::pow((m_lastMaxCwnd - segCwnd) / m_c, 1 / 3.);
+            m_bicK = std::cbrt((m_lastMaxCwnd - segCwnd) / m_c);
             m_bicOriginPoint = m_lastMaxCwnd;
             NS_LOG_DEBUG("lastMaxCwnd > m_cWnd. K=" << m_bicK << " and origin=" << m_lastMaxCwnd);
         }
     }
 
-    t = Simulator::Now() + m_delayMin - m_epochStart;
+    t = Simulator::Now() - m_epochStart + m_delayMin;
 
     if (t.GetSeconds() < m_bicK) /* t - K */
     {
@@ -323,19 +270,18 @@ TcpCubic::Update(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked)
 
     if (m_tcpFriendliness)
     {
-        auto scale = static_cast<uint32_t>(8 * (1024 + m_beta * 1024) / 3 / (1024 - m_beta * 1024));
-        delta = (segCwnd * scale) >> 3;
-        while (m_ackCnt > delta)
-        {
-            m_ackCnt -= delta;
-            m_tcpCwnd++;
+        auto delta = static_cast<uint32_t>(segCwnd * m_betaScale);
+        if (delta == 0) {
+            std::cerr << "TcpCubic::Update() unexpected zero delta\n";
+            delta = 1;
         }
-        if (m_tcpCwnd > segCwnd)
-        {
-            delta = m_tcpCwnd - segCwnd;
-            maxCnt = segCwnd / delta;
-            if (cnt > maxCnt)
-            {
+        m_tcpSegCwnd += m_ackCnt / delta;
+        m_ackCnt = m_ackCnt % delta;
+
+        if (m_tcpSegCwnd > segCwnd) {
+            delta = m_tcpSegCwnd - segCwnd;
+            uint32_t maxCnt = segCwnd / delta;
+            if (cnt > maxCnt) {
                 cnt = maxCnt;
             }
         }
@@ -351,6 +297,11 @@ TcpCubic::PktsAcked(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked, const Time&
 {
     NS_LOG_FUNCTION(this << tcb << segmentsAcked << rtt);
 
+    if (rtt.IsNegative())
+    {
+        return;
+    }
+
     /* Discard delay samples right after fast recovery */
     if (m_epochStart != Time::Min() && (Simulator::Now() - m_epochStart) < m_cubicDelta)
     {
@@ -358,13 +309,13 @@ TcpCubic::PktsAcked(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked, const Time&
     }
 
     /* first time call or link delay decreases */
-    if (m_delayMin == Time::Min() || m_delayMin > rtt)
+    if (m_delayMin.IsZero() || m_delayMin > rtt)
     {
         m_delayMin = rtt;
     }
 
     /* hystart triggers when cwnd is larger than some threshold */
-    if (m_hystart && tcb->m_cWnd <= tcb->m_ssThresh &&
+    if (!m_found && m_hystart && tcb->m_cWnd < tcb->m_ssThresh &&
         tcb->m_cWnd >= m_hystartLowWindow * tcb->m_segmentSize)
     {
         HystartUpdate(tcb, rtt);
@@ -376,7 +327,12 @@ TcpCubic::HystartUpdate(Ptr<TcpSocketState> tcb, const Time& delay)
 {
     NS_LOG_FUNCTION(this << delay);
 
-    if (!m_found)
+    if (tcb->m_lastAckedSeq > m_endSeq)
+    {
+        HystartReset(tcb);
+    }
+
+    if (m_hystartDetect & PACKET_TRAIN)
     {
         Time now = Simulator::Now();
 
@@ -384,44 +340,36 @@ TcpCubic::HystartUpdate(Ptr<TcpSocketState> tcb, const Time& delay)
         if ((now - m_lastAck) <= m_hystartAckDelta)
         {
             m_lastAck = now;
-
-            if ((now - m_roundStart) > m_delayMin)
-            {
-                if (m_hystartDetect == HybridSSDetectionMode::PACKET_TRAIN ||
-                    m_hystartDetect == HybridSSDetectionMode::BOTH)
-                {
-                    m_found = true;
-                }
+            Time hystartAckDelay{0};
+            if (DataRate rate = tcb->m_pacingRate.Get(); rate.GetBitRate() != 0) {
+                hystartAckDelay = std::min(MilliSeconds(1), rate.CalculateBytesTxTime(tcb->m_segmentSize * 4));
             }
-        }
-
-        /* obtain the minimum delay of more than sampling packets */
-        if (m_sampleCnt < m_hystartMinSamples)
-        {
-            if (m_currRtt == Time::Min() || m_currRtt > delay)
-            {
-                m_currRtt = delay;
+            if (!tcb->m_pacing) {
+                hystartAckDelay = hystartAckDelay / 2;
             }
-
-            ++m_sampleCnt;
-        }
-        else if (m_currRtt > m_delayMin + HystartDelayThresh(m_delayMin))
-        {
-            if (m_hystartDetect == HybridSSDetectionMode::DELAY ||
-                m_hystartDetect == HybridSSDetectionMode::BOTH)
+            Time threshold = m_delayMin + hystartAckDelay;
+            if ((now - m_roundStart) > threshold)
             {
                 m_found = true;
+                tcb->m_ssThresh = tcb->m_cWnd;
             }
         }
+    }
 
-        /*
-         * Either one of two conditions are met,
-         * we exit from slow start immediately.
-         */
-        if (m_found)
+    if (m_hystartDetect & DELAY)
+    {
+        m_currRtt = std::min(m_currRtt, delay);
+        if (m_sampleCnt < m_hystartMinSamples)
         {
-            NS_LOG_DEBUG("Exit from SS, immediately :-)");
-            tcb->m_ssThresh = tcb->m_cWnd;
+            m_sampleCnt++;
+        }
+        else
+        {
+            if (m_currRtt > m_delayMin + HystartDelayThresh(m_delayMin / 8))
+            {
+                m_found = true;
+                tcb->m_ssThresh = tcb->m_cWnd;
+            }
         }
     }
 }
@@ -490,12 +438,14 @@ TcpCubic::CubicReset(Ptr<const TcpSocketState> tcb)
 {
     NS_LOG_FUNCTION(this << tcb);
 
+    m_cWndCnt = 0;
     m_lastMaxCwnd = 0;
     m_bicOriginPoint = 0;
     m_bicK = 0;
+    m_delayMin = Time{0};
+    m_epochStart = Time::Min();
     m_ackCnt = 0;
-    m_tcpCwnd = 0;
-    m_delayMin = Time::Min();
+    m_tcpSegCwnd = 0;
     m_found = false;
 }
 

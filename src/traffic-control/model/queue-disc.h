@@ -670,6 +670,7 @@ class QueueDisc : public Object
      */
     bool Transmit(Ptr<QueueDiscItem> item);
 
+protected:
     /**
      * \brief Perform the actions required when the queue disc is notified of
      *        a packet enqueue
@@ -684,6 +685,7 @@ class QueueDisc : public Object
      */
     void PacketDequeued(Ptr<const QueueDiscItem> item);
 
+private:
     /// Default quota (as in /proc/sys/net/core/dev_weight)
     static const uint32_t DEFAULT_QUOTA = 64;
 

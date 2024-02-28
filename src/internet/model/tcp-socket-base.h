@@ -52,32 +52,20 @@ class TcpOption;
 class Ipv4Interface;
 class Ipv6Interface;
 class TcpRateOps;
+class TcpTxItem;
 
-/**
- * \ingroup tcp
- *
- * \brief Helper class to store RTT measurements
- */
-class RttHistory
-{
-  public:
-    /**
-     * \brief Constructor - builds an RttHistory with the given parameters
-     * \param s First sequence number in packet sent
-     * \param c Number of bytes sent
-     * \param t Time this one was sent
-     */
-    RttHistory(SequenceNumber32 s, uint32_t c, Time t);
-    /**
-     * \brief Copy constructor
-     * \param h the object to copy
-     */
-    RttHistory(const RttHistory& h); // Copy constructor
-  public:
-    SequenceNumber32 seq; //!< First sequence number in packet sent
-    uint32_t count;       //!< Number of bytes sent
-    Time time;            //!< Time this one was sent
-    bool retx;            //!< True if this has been retransmitted
+struct SackTagState {
+    uint32_t m_pktsCumuAcked{0};
+    uint32_t m_bytesSacked{0};
+    Time m_firstSackTime{Time::Min()};
+    Time m_lastSackTime{Time::Min()};
+    Time m_firstCumuAckTime{Time::Min()};
+    Time m_lastCumuAckTime{Time::Min()};
+    bool m_retransDataCumuAcked{false};
+    bool m_cumuAcked{false};
+
+    inline bool IsFirstSackTimeValid() const { return m_firstSackTime.IsPositive(); }
+    inline bool IsFirstCumuAckTimeValid() const { return m_firstCumuAckTime.IsPositive(); }
 };
 
 /**
@@ -264,12 +252,6 @@ class TcpSocketBase : public TcpSocket
      * \param tcp the TCP L4 protocol
      */
     virtual void SetTcp(Ptr<TcpL4Protocol> tcp);
-
-    /**
-     * \brief Set the associated RTT estimator.
-     * \param rtt the RTT estimator
-     */
-    virtual void SetRtt(Ptr<RttEstimator> rtt);
 
     /**
      * \brief Sets the Minimum RTO.
@@ -607,6 +589,11 @@ class TcpSocketBase : public TcpSocket
     int GetPeerName(Address& address) const override;
     void BindToNetDevice(Ptr<NetDevice> netdevice) override; // NetDevice with my m_endPoint
 
+    void TxEnqueued(uint32_t size);
+    void TxDropped();
+    void TxComplete(uint32_t size);
+    void SetFqPacing();
+
     /**
      * TracedCallback signature for tcp packet transmission or reception events.
      *
@@ -789,6 +776,9 @@ class TcpSocketBase : public TcpSocket
                       uint8_t icmpCode,
                       uint32_t icmpInfo);
 
+
+    bool IsTcpSmallQueueThrottled();
+
     /**
      * \brief Send as much pending data as possible according to the Tx window.
      *
@@ -890,6 +880,11 @@ class TcpSocketBase : public TcpSocket
     void TimeWait();
 
     // State transition functions
+
+    SequenceNumber32 GetSndUna() const; // Equivalent to tp->snd_una in Linux. First byte we want an ack for.
+    SequenceNumber32 GetSndNxt() const; // Equivalent to tp->snd_una in Linux. Next sequence we send.
+
+    void TcpAck(Ptr<Packet> packet, const TcpHeader& tcpHeader);
 
     /**
      * \brief Received a packet upon ESTABLISHED state.
@@ -1037,10 +1032,9 @@ class TcpSocketBase : public TcpSocket
      * updated with SACK information
      * \param currentDelivered The number of bytes (S)ACKed
      */
-    virtual void ProcessAck(const SequenceNumber32& ackNumber,
-                            bool scoreboardUpdated,
+    virtual void ProcessAck(SequenceNumber32 ackNumber,
                             uint32_t currentDelivered,
-                            const SequenceNumber32& oldHeadSequence);
+                            SequenceNumber32 oldHeadSequence);
 
     /**
      * \brief Recv of a data, put into buffer, call L7 to get it if necessary
@@ -1050,34 +1044,11 @@ class TcpSocketBase : public TcpSocket
     virtual void ReceivedData(Ptr<Packet> packet, const TcpHeader& tcpHeader);
 
     /**
-     * \brief Take into account the packet for RTT estimation
-     * \param tcpHeader the packet's TCP header
-     */
-    virtual void EstimateRtt(const TcpHeader& tcpHeader);
-
-    /**
-     * \brief Update the RTT history, when we send TCP segments
-     *
-     * \param seq The sequence number of the TCP segment
-     * \param sz The segment's size
-     * \param isRetransmission Whether or not the segment is a retransmission
-     */
-
-    virtual void UpdateRttHistory(const SequenceNumber32& seq, uint32_t sz, bool isRetransmission);
-
-    /**
      * \brief Update buffers w.r.t. ACK
      * \param seq the sequence number
      * \param resetRTO indicates if RTO should be reset
      */
-    virtual void NewAck(const SequenceNumber32& seq, bool resetRTO);
-
-    /**
-     * \brief Dupack management
-     *
-     * \param currentDelivered Current (S)ACKed bytes
-     */
-    void DupAck(uint32_t currentDelivered);
+    virtual void NewAck(SequenceNumber32 seq);
 
     /**
      * \brief Enter CA_CWR state upon receipt of an ECN Echo
@@ -1092,6 +1063,9 @@ class TcpSocketBase : public TcpSocket
      * \param currentDelivered Currently (S)ACKed bytes
      */
     void EnterRecovery(uint32_t currentDelivered);
+
+
+    void ExitRecovery(); // Exit CA_RECOVERY or CA_CWR
 
     /**
      * \brief An RTO event happened
@@ -1136,7 +1110,7 @@ class TcpSocketBase : public TcpSocket
      * \param tcpHeader Header of the segment
      * \param [out] bytesSacked Number of bytes SACKed, or 0
      */
-    void ReadOptions(const TcpHeader& tcpHeader, uint32_t* bytesSacked);
+    void SackTagWriteQueue(const TcpHeader& tcpHeader, SackTagState* sackTagState);
 
     /**
      * \brief Return true if the specified option is enabled
@@ -1183,14 +1157,6 @@ class TcpSocketBase : public TcpSocket
      * \param option SACK PERMITTED option from the header
      */
     void ProcessOptionSackPermitted(const Ptr<const TcpOption> option);
-
-    /**
-     * \brief Read the SACK option
-     *
-     * \param option SACK option from the header
-     * \returns the number of bytes sacked by this option
-     */
-    uint32_t ProcessOptionSack(const Ptr<const TcpOption> option);
 
     /**
      * \brief Add the SACK PERMITTED option to the header
@@ -1274,6 +1240,14 @@ class TcpSocketBase : public TcpSocket
      */
     SequenceNumber32 GetHighRxAck() const;
 
+    void SkbDeliveredSack(SackTagState* sackTagState, TcpTxItem* skb);
+
+    void SkbDeliveredCumuAck(SackTagState* sackTagState, TcpTxItem* skb);
+
+    bool AckUpdateRtt(const TcpHeader& tcpHdr, bool acked, Time seqRtt, Time sackRtt, Time* caRtt);
+
+    void SynAckRttMeasure(const TcpHeader& tcpHdr);
+
   protected:
     // Counters and events
     EventId m_retxEvent{};     //!< Retransmission event
@@ -1282,8 +1256,11 @@ class TcpSocketBase : public TcpSocket
     EventId m_persistEvent{};  //!< Persist event: Send 1 byte to probe for a non-zero Rx window
     EventId m_timewaitEvent{}; //!< TIME_WAIT expiration event: Move this socket to CLOSED state
 
+
+    bool m_fqPacing{false};
+    int m_bytesInQDisc{0};
+
     // ACK management
-    uint32_t m_dupAckCount{0};    //!< Dupack counter
     uint32_t m_delAckCount{0};    //!< Delayed ACK counter
     uint32_t m_delAckMaxCount{0}; //!< Number of packet to fire an ACK before delay timeout
 
@@ -1304,9 +1281,6 @@ class TcpSocketBase : public TcpSocket
     Time m_persistTimeout{Seconds(0.0)};     //!< Time between sending 1-byte probes
     Time m_cnTimeout{Seconds(0.0)};          //!< Timeout for connection retry
 
-    // History of RTT
-    std::deque<RttHistory> m_history; //!< List of sent packet
-
     // Connections to other layers of TCP/IP
     Ipv4EndPoint* m_endPoint{nullptr};  //!< the IPv4 endpoint
     Ipv6EndPoint* m_endPoint6{nullptr}; //!< the IPv6 endpoint
@@ -1316,8 +1290,6 @@ class TcpSocketBase : public TcpSocket
         m_icmpCallback; //!< ICMP callback
     Callback<void, Ipv6Address, uint8_t, uint8_t, uint8_t, uint32_t>
         m_icmpCallback6; //!< ICMPv6 callback
-
-    Ptr<RttEstimator> m_rtt; //!< Round trip time estimator
 
     // Tx buffer management
     Ptr<TcpTxBuffer> m_txBuffer; //!< Tx buffer
@@ -1336,12 +1308,15 @@ class TcpSocketBase : public TcpSocket
 
     // Window management
     uint16_t m_maxWinSize{0};                         //!< Maximum window size to advertise
-    uint32_t m_bytesAckedNotProcessed{0};             //!< Bytes acked, but not processed
+   uint32_t m_bytesAckedNotProcessed{0};             //!< Bytes acked, but not processed
     SequenceNumber32 m_highTxAck{0};                  //!< Highest ack sent
     TracedValue<uint32_t> m_rWnd{0};                  //!< Receiver window (RCV.WND in RFC793)
     TracedValue<uint32_t> m_advWnd{0};                //!< Advertised Window size
     TracedValue<SequenceNumber32> m_highRxMark{0};    //!< Highest seqno received
     TracedValue<SequenceNumber32> m_highRxAckMark{0}; //!< Highest ack received
+
+    SequenceNumber32 m_cwndUsageSeq{0};
+    bool m_isCwndLimited{false};
 
     // Options
     bool m_sackEnabled{true};       //!< RFC SACK option enabled
@@ -1356,20 +1331,15 @@ class TcpSocketBase : public TcpSocket
     // Fast Retransmit and Recovery
     SequenceNumber32 m_recover{
         0}; //!< Previous highest Tx seqnum for fast recovery (set it to initial seq number)
-    bool m_recoverActive{false}; //!< Whether "m_recover" has been set/activated
-                                 //!< It is used to avoid comparing with the old m_recover value
-                                 //!< which was set for handling previous congestion event.
     uint32_t m_retxThresh{3};    //!< Fast Retransmit threshold
     bool m_limitedTx{true};      //!< perform limited transmit
 
+public:
     // Transmission Control Block
     Ptr<TcpSocketState> m_tcb;                 //!< Congestion control information
+protected:
     Ptr<TcpCongestionOps> m_congestionControl; //!< Congestion control
     Ptr<TcpRecoveryOps> m_recoveryOps;         //!< Recovery Algorithm
-    Ptr<TcpRateOps> m_rateOps;                 //!< Rate operations
-
-    // Guesses over the other connection end
-    bool m_isFirstPartialAck{true}; //!< First partial ACK during RECOVERY
 
     // The following two traces pass a packet with a TCP header
     TracedCallback<Ptr<const Packet>,
@@ -1391,6 +1361,11 @@ class TcpSocketBase : public TcpSocket
     TracedValue<SequenceNumber32> m_ecnCESeq{
         0}; //!< Sequence number of the last received Congestion Experienced
     TracedValue<SequenceNumber32> m_ecnCWRSeq{0}; //!< Sequence number of the last sent CWR
+
+public:
+    uint64_t GetTotalDeliveredBytes() const;
+    uint64_t GetTotalLostBytes() const;
+    uint64_t GetTotalRetransBytes() const;
 };
 
 /**

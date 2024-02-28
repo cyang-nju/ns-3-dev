@@ -28,6 +28,8 @@
 #include "ns3/simulator.h"
 #include "ns3/socket.h"
 #include "ns3/uinteger.h"
+#include "ns3/ipv4-queue-disc-item.h"
+#include "ns3/tcp-socket-base.h"
 
 namespace ns3
 {
@@ -747,6 +749,10 @@ QueueDisc::DropBeforeEnqueue(Ptr<const QueueDiscItem> item, const char* reason)
         m_stats.nDroppedBytesBeforeEnqueue[reason] = item->GetSize();
     }
 
+    if (auto tcpSock = dynamic_cast<TcpSocketBase*>(item->GetPacket()->GetSocket()); tcpSock != nullptr) {
+        tcpSock->TxDropped();
+    }
+
     NS_LOG_DEBUG("Total packets/bytes dropped before enqueue: "
                  << m_stats.nTotalDroppedPacketsBeforeEnqueue << " / "
                  << m_stats.nTotalDroppedBytesBeforeEnqueue);
@@ -795,6 +801,10 @@ QueueDisc::DropAfterDequeue(Ptr<const QueueDiscItem> item, const char* reason)
         m_peeked = false;
         PacketDequeued(item);
         m_peeked = true;
+    }
+
+    if (auto tcpSock = dynamic_cast<TcpSocketBase*>(item->GetPacket()->TakeSocketInfo()); tcpSock != nullptr) {
+        tcpSock->TxComplete(item->GetSize());
     }
 
     NS_LOG_DEBUG("Total packets/bytes dropped after dequeue: "
@@ -859,7 +869,14 @@ QueueDisc::Enqueue(Ptr<QueueDiscItem> item)
 
     if (retval)
     {
+        bool isFresh = item->GetTimeStamp().IsZero();
         item->SetTimeStamp(Simulator::Now());
+        if (isFresh) {
+            auto tcpSock = dynamic_cast<TcpSocketBase*>(item->GetPacket()->GetSocket());
+            if (tcpSock != nullptr) {
+                tcpSock->TxEnqueued(item->GetSize());
+            }
+        }
     }
 
     // DoEnqueue may return false because:
@@ -1082,7 +1099,17 @@ QueueDisc::Transmit(Ptr<QueueDiscItem> item)
         item->GetPacket()->RemovePacketTag(priorityTag);
     }
     NS_ASSERT_MSG(m_send, "Send callback not set");
+
+
+    uint32_t pktSize = item->GetSize();
+    auto tcpSock = dynamic_cast<TcpSocketBase*>(item->GetPacket()->TakeSocketInfo());
+
     m_send(item);
+
+    if (tcpSock != nullptr) {
+        tcpSock->TxComplete(pktSize);
+    }
+
 
     // the behavior here slightly diverges from Linux. In Linux, it is advised that
     // the function called when a packet needs to be transmitted (ndo_start_xmit)

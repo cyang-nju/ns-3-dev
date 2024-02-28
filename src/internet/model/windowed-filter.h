@@ -135,26 +135,17 @@ template <class T, class Compare, typename TimeT, typename TimeDeltaT>
 class WindowedFilter
 {
   public:
+    WindowedFilter() = default;
+    
     /**
-     * \brief constructor
-     */
-    WindowedFilter()
-    {
-    }
-
-    /**
-     * \brief constructor
+     * \brief contructor
      * \param windowLength is the period after which a best estimate expires.
      * \param zeroValue is used as the uninitialized value for objects of T. Importantly,
      * zeroValue should be an invalid value for a true sample.
      * \param zeroTime is the time of instance record time.
      */
-    WindowedFilter(TimeDeltaT windowLength, T zeroValue, TimeT zeroTime)
-        : m_windowLength(windowLength),
-          m_zeroValue(zeroValue),
-          m_samples{Sample(m_zeroValue, zeroTime),
-                    Sample(m_zeroValue, zeroTime),
-                    Sample(m_zeroValue, zeroTime)}
+    WindowedFilter(TimeDeltaT windowLength)
+        : m_windowLength(windowLength)
     {
     }
 
@@ -176,9 +167,7 @@ class WindowedFilter
      */
     void Update(T new_sample, TimeT new_time)
     {
-        // Reset all estimates if they have not yet been initialized, if new sample
-        // is a new best, or if the newest recorded estimate is too old.
-        if (m_samples[0].sample == m_zeroValue || Compare()(new_sample, m_samples[0].sample) ||
+        if (Compare()(new_sample, m_samples[0].sample) ||
             new_time - m_samples[2].time > m_windowLength)
         {
             Reset(new_sample, new_time);
@@ -212,7 +201,7 @@ class WindowedFilter
             }
             return;
         }
-        if (m_samples[1].sample == m_samples[0].sample &&
+        if (m_samples[1].time == m_samples[0].time &&
             new_time - m_samples[1].time > m_windowLength >> 2)
         {
             // A quarter of the window has passed without a better sample, so the
@@ -220,7 +209,7 @@ class WindowedFilter
             m_samples[2] = m_samples[1] = Sample(new_sample, new_time);
             return;
         }
-        if (m_samples[2].sample == m_samples[1].sample &&
+        if (m_samples[2].time == m_samples[1].time &&
             new_time - m_samples[2].time > m_windowLength >> 1)
         {
             // We've passed a half of the window without a better estimate, so take
@@ -294,7 +283,6 @@ class WindowedFilter
     };
 
     TimeDeltaT m_windowLength; //!< Time length of window.
-    T m_zeroValue;             //!< Uninitialized value of T.
     Sample m_samples[3];       //!< Best estimate is element 0.
 };
 

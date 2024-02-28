@@ -172,28 +172,33 @@ TcpRxBuffer::Add(Ptr<Packet> p, const TcpHeader& tcph)
         }
     }
     // Remove overlapped bytes from packet
-    auto i = m_data.begin();
-    while (i != m_data.end() && i->first <= tailSeq)
+    auto i = m_data.lower_bound(tailSeq);
+    while (i != m_data.begin())
     {
+        i--;
         SequenceNumber32 lastByteSeq = i->first + SequenceNumber32(i->second->GetSize());
-        if (lastByteSeq > headSeq)
+        if (lastByteSeq <= headSeq)
         {
-            if (i->first > headSeq && lastByteSeq < tailSeq)
-            { // Rare case: Existing packet is embedded fully in the new packet
-                m_size -= i->second->GetSize();
-                m_data.erase(i++);
-                continue;
-            }
-            if (i->first <= headSeq)
-            { // Incoming head is overlapped
-                headSeq = lastByteSeq;
-            }
-            if (lastByteSeq >= tailSeq)
-            { // Incoming tail is overlapped
-                tailSeq = i->first;
-            }
+            break;
         }
-        ++i;
+
+        if (i->first > headSeq && lastByteSeq < tailSeq)
+        {
+            // Rare case: Existing packet is embedded fully in the new packet
+            m_size -= i->second->GetSize();
+            i = m_data.erase(i);
+            continue;
+        }
+        if (i->first <= headSeq)
+        {
+            // Incoming head is overlapped
+            headSeq = lastByteSeq;
+        }
+        if (lastByteSeq >= tailSeq)
+        {
+            // Incoming tail is overlapped
+            tailSeq = i->first;
+        }
     }
     // We now know how much we are going to store, trim the packet
     if (headSeq >= tailSeq)
@@ -203,7 +208,7 @@ TcpRxBuffer::Add(Ptr<Packet> p, const TcpHeader& tcph)
     }
     else
     {
-        uint32_t start = static_cast<uint32_t>(headSeq - tcph.GetSequenceNumber());
+        auto start = static_cast<uint32_t>(headSeq - tcph.GetSequenceNumber());
         auto length = static_cast<uint32_t>(tailSeq - headSeq);
         p = p->CreateFragment(start, length);
         NS_ASSERT(length == p->GetSize());
@@ -233,8 +238,8 @@ TcpRxBuffer::Add(Ptr<Packet> p, const TcpHeader& tcph)
         };
         m_nextRxSeq = i->first + SequenceNumber32(i->second->GetSize());
         m_availBytes += i->second->GetSize();
-        ClearSackList(m_nextRxSeq);
     }
+    ClearSackList(m_nextRxSeq);
     NS_LOG_LOGIC("Updated buffer occupancy=" << m_size << " nextRxSeq=" << m_nextRxSeq);
     if (m_gotFin && m_nextRxSeq == m_finSeq)
     { // Account for the FIN packet
@@ -252,14 +257,10 @@ TcpRxBuffer::GetSackListSize() const
 }
 
 void
-TcpRxBuffer::UpdateSackList(const SequenceNumber32& head, const SequenceNumber32& tail)
+TcpRxBuffer::UpdateSackList(const SequenceNumber32& seq, const SequenceNumber32& endSeq)
 {
-    NS_LOG_FUNCTION(this << head << tail);
-    NS_ASSERT(head > m_nextRxSeq);
-
-    TcpOptionSack::SackBlock current;
-    current.first = head;
-    current.second = tail;
+    NS_LOG_FUNCTION(this << seq << endSeq);
+    NS_ASSERT(seq > m_nextRxSeq);
 
     // The block "current" has been safely stored. Now we need to build the SACK
     // list, to be advertised. From RFC 2018:
@@ -287,60 +288,42 @@ TcpRxBuffer::UpdateSackList(const SequenceNumber32& head, const SequenceNumber32
     //     following SACK blocks in the SACK option may be listed in
     //     arbitrary order.
 
-    m_sackList.push_front(current);
 
-    // We have inserted the block at the beginning of the list. Now, we should
-    // check if any existing blocks overlap with that.
-    bool updated = false;
-    auto it = m_sackList.begin();
-    TcpOptionSack::SackBlock begin = *it;
-    TcpOptionSack::SackBlock merged;
-    ++it;
+    for (uint32_t i = 0; i < m_sackList.size(); i++) {
+        if (seq <= m_sackList[i].second && m_sackList[i].first <= endSeq) {
+            m_sackList[i].first = std::min(m_sackList[i].first, seq);
+            m_sackList[i].second = std::min(m_sackList[i].second, endSeq);
 
-    // Iterates until we examined all blocks in the list (maximum 4)
-    while (it != m_sackList.end())
-    {
-        current = *it;
+            // Rotate this_sack to the first one.
+            for (; i > 0; i--) {
+                std::swap(m_sackList[i], m_sackList[i-1]);
+            }
 
-        // This is a left merge:
-        // [current_first; current_second] [beg_first; beg_second]
-        if (begin.first == current.second)
-        {
-            NS_ASSERT(current.first < begin.second);
-            merged = TcpOptionSack::SackBlock(current.first, begin.second);
-            updated = true;
+            /* See if the recent change to the first SACK eats into
+	         * or hits the sequence space of other SACK blocks, if so coalesce.
+	         */
+            auto it = m_sackList.begin() + 1;
+            while (it != m_sackList.end()) {
+                if (it->first <= m_sackList[0].second && m_sackList[0].first <= it->second) {
+                    m_sackList[0].first = std::min(m_sackList[0].first, it->first);
+                    m_sackList[0].second = std::min(m_sackList[0].second, it->second);
+                    it = m_sackList.erase(it);
+                    continue;
+                }
+                it++;
+            }
+
+            return;
         }
-        // while this is a right merge
-        // [begin_first; begin_second] [current_first; current_second]
-        else if (begin.second == current.first)
-        {
-            NS_ASSERT(begin.first < current.second);
-            merged = TcpOptionSack::SackBlock(begin.first, current.second);
-            updated = true;
-        }
-
-        // If we have merged the blocks (and the result is in merged) we should
-        // delete the current block (it), the first block, and insert the merged
-        // one at the beginning.
-        if (updated)
-        {
-            m_sackList.erase(it);
-            m_sackList.pop_front();
-            m_sackList.push_front(merged);
-            it = m_sackList.begin();
-            begin = *it;
-            updated = false;
-        }
-
-        ++it;
     }
 
-    // Since the maximum blocks that fits into a TCP header are 4, there's no
-    // point on maintaining the others.
-    if (m_sackList.size() > 4)
-    {
+    // Could not find an adjacent existing SACK, build a new one and put it at the front.
+
+    // If the sack array is full, forget about the last one.
+    if (m_sackList.size() >= 4) {
         m_sackList.pop_back();
     }
+    m_sackList.insert(m_sackList.begin(), TcpOptionSack::SackBlock{seq, endSeq});
 
     // Please note that, if a block b is discarded and then a block contiguous
     // to b is received, only that new block (without the b part) is reported.

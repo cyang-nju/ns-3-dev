@@ -21,6 +21,7 @@
 #include "ns3/nstime.h"
 #include "ns3/packet.h"
 #include "ns3/sequence-number.h"
+#include <optional>
 
 namespace ns3
 {
@@ -48,6 +49,10 @@ class TcpTxItem
      */
     uint32_t GetSeqSize() const;
 
+    SequenceNumber32 GetStartSeq() const;
+
+    SequenceNumber32 GetEndSeq() const;
+
     /**
      * \brief Is the item sacked?
      * \return true if the item is sacked, false otherwise
@@ -59,6 +64,8 @@ class TcpTxItem
      * \return true if the item have been retransmitted
      */
     bool IsRetrans() const;
+
+    bool IsLost() const;
 
     /**
      * \brief Get a copy of the Packet underlying this item
@@ -111,11 +118,15 @@ class TcpTxItem
     SequenceNumber32 m_startSeq{0}; //!< Sequence number of the item (if transmitted)
     Ptr<Packet> m_packet{nullptr};  //!< Application packet (can be null)
     bool m_lost{false};             //!< Indicates if the segment has been lost (RTO)
-    Time m_lastSent{
-        Time::Max()};     //!< Timestamp of the time at which the segment has been sent last time
-    bool m_sacked{false}; //!< Indicates if the segment has been SACKed
+    Time m_lastSent{Time::Max()};   //!< Timestamp of the time at which the segment has been sent last time
+    bool m_sacked{false};           //!< Indicates if the segment has been SACKed
+    bool m_rttNotReliable{false};
+    std::optional<std::list<TcpTxItem*>::iterator> m_tsortedAnchor; //!< Position in lastSendTime-sorted list of un-SACKed item
 
     RateInformation m_rateInfo; //!< Rate information of the item
+
+  public:
+    bool IsRttReliable() const { return !m_rttNotReliable; }
 };
 
 } // namespace ns3

@@ -63,6 +63,18 @@ TcpTxItem::GetSeqSize() const
     return m_packet && m_packet->GetSize() > 0 ? m_packet->GetSize() : 1;
 }
 
+SequenceNumber32
+TcpTxItem::GetStartSeq() const
+{
+    return m_startSeq;
+}
+
+SequenceNumber32
+TcpTxItem::GetEndSeq() const
+{
+    return m_startSeq + GetSeqSize();
+}
+
 bool
 TcpTxItem::IsSacked() const
 {
@@ -73,6 +85,12 @@ bool
 TcpTxItem::IsRetrans() const
 {
     return m_retrans;
+}
+
+bool
+TcpTxItem::IsLost() const
+{
+    return m_lost;
 }
 
 Ptr<Packet>

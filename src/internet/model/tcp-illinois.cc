@@ -226,7 +226,7 @@ TcpIllinois::PktsAcked(Ptr<TcpSocketState> tcb, uint32_t packetsAcked, const Tim
 {
     NS_LOG_FUNCTION(this << tcb << packetsAcked << rtt);
 
-    if (rtt.IsZero())
+    if (rtt.IsNegative())
     {
         return;
     }

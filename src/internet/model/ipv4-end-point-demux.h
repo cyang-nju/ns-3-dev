@@ -25,6 +25,8 @@
 #include "ns3/ipv4-address.h"
 
 #include <list>
+#include <map>
+#include <unordered_map>
 #include <stdint.h>
 
 namespace ns3
@@ -59,12 +61,6 @@ class Ipv4EndPointDemux
 
     Ipv4EndPointDemux();
     ~Ipv4EndPointDemux();
-
-    /**
-     * \brief Get the entire list of end points registered.
-     * \return list of Ipv4EndPoint
-     */
-    EndPoints GetAllEndPoints();
 
     /**
      * \brief Lookup for port local.
@@ -192,10 +188,8 @@ class Ipv4EndPointDemux
      */
     uint16_t m_portFirst;
 
-    /**
-     * \brief A list of IPv4 end points.
-     */
-    EndPoints m_endPoints;
+    std::unordered_map<uint16_t, EndPoints> m_lportEndPointsMap;
+    std::map<uint64_t, EndPoints> m_tuple4EndPointsMap;
 };
 
 } // namespace ns3

@@ -206,14 +206,12 @@ TcpL4Protocol::CreateSocket(TypeId congestionTypeId, TypeId recoveryTypeId)
     congestionAlgorithmFactory.SetTypeId(congestionTypeId);
     recoveryAlgorithmFactory.SetTypeId(recoveryTypeId);
 
-    Ptr<RttEstimator> rtt = rttFactory.Create<RttEstimator>();
     Ptr<TcpSocketBase> socket = CreateObject<TcpSocketBase>();
     Ptr<TcpCongestionOps> algo = congestionAlgorithmFactory.Create<TcpCongestionOps>();
     Ptr<TcpRecoveryOps> recovery = recoveryAlgorithmFactory.Create<TcpRecoveryOps>();
 
     socket->SetNode(m_node);
     socket->SetTcp(this);
-    socket->SetRtt(rtt);
     socket->SetCongestionControlAlgorithm(algo);
     socket->SetRecoveryAlgorithm(recovery);
 

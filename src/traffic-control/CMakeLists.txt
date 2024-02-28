@@ -9,6 +9,7 @@ build_lib(
     model/fq-cobalt-queue-disc.cc
     model/fq-codel-queue-disc.cc
     model/fq-pie-queue-disc.cc
+    model/fq-queue-disc.cc
     model/mq-queue-disc.cc
     model/packet-filter.cc
     model/pfifo-fast-queue-disc.cc
@@ -27,6 +28,7 @@ build_lib(
     model/fq-cobalt-queue-disc.h
     model/fq-codel-queue-disc.h
     model/fq-pie-queue-disc.h
+    model/fq-queue-disc.h
     model/mq-queue-disc.h
     model/packet-filter.h
     model/pfifo-fast-queue-disc.h

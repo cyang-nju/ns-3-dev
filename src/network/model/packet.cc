@@ -156,7 +156,9 @@ Packet::Packet(const Packet& o)
     : m_buffer(o.m_buffer),
       m_byteTagList(o.m_byteTagList),
       m_packetTagList(o.m_packetTagList),
-      m_metadata(o.m_metadata)
+      m_metadata(o.m_metadata),
+      m_sock(o.m_sock),
+      m_txTime{o.m_txTime}
 {
     o.m_nixVector ? m_nixVector = o.m_nixVector->Copy() : m_nixVector = nullptr;
 }
@@ -1015,6 +1017,48 @@ Packet::PrintPacketTags(std::ostream& os) const
         }
     }
 }
+
+
+void
+Packet::SetSocket(Socket* sock)
+{
+    m_sock = sock;
+}
+
+Socket*
+Packet::GetSocket() const
+{
+    return m_sock;
+}
+
+Socket*
+Packet::TakeSocketInfo()
+{
+    auto ret = m_sock;
+    m_sock = nullptr;
+    return ret;
+}
+
+void
+Packet::SetTxTime(Time t)
+{
+    m_txTime = t;
+}
+
+Time
+Packet::GetTxTime() const
+{
+    return m_txTime;
+}
+
+Time
+Packet::TakeTxTime()
+{
+    auto ret = m_txTime;
+    m_txTime = Time{0};
+    return ret;
+}
+
 
 PacketTagIterator
 Packet::GetPacketTagIterator() const

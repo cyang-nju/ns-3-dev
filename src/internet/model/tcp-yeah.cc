@@ -150,7 +150,7 @@ TcpYeah::PktsAcked(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked, const Time& 
 {
     NS_LOG_FUNCTION(this << tcb << segmentsAcked << rtt);
 
-    if (rtt.IsZero())
+    if (rtt.IsNegative())
     {
         return;
     }

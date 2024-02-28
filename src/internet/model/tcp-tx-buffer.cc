@@ -68,9 +68,9 @@ TcpTxBuffer::TcpTxBuffer(uint32_t n)
 
 TcpTxBuffer::~TcpTxBuffer()
 {
-    for (auto it = m_sentList.begin(); it != m_sentList.end(); ++it)
+    for (auto it = m_sentBuf.begin(); it != m_sentBuf.end(); ++it)
     {
-        TcpTxItem* item = *it;
+        TcpTxItem* item = it->second;
         m_sentSize -= item->m_packet->GetSize();
         delete item;
     }
@@ -149,6 +149,19 @@ TcpTxBuffer::GetRetransmitsCount() const
     return m_retrans;
 }
 
+uint64_t
+TcpTxBuffer::GetTotalLost() const
+{
+    return m_totalLost;
+}
+
+uint64_t
+TcpTxBuffer::GetTotalRetrans() const
+{
+    return m_totalRetrans;
+}
+
+
 uint32_t
 TcpTxBuffer::GetLost() const
 {
@@ -167,14 +180,29 @@ TcpTxBuffer::SetHeadSequence(const SequenceNumber32& seq)
     NS_LOG_FUNCTION(this << seq);
     m_firstByteSeq = seq;
 
-    if (!m_sentList.empty())
-    {
-        m_sentList.front()->m_startSeq = seq;
-    }
-
     // if you change the head with data already sent, something bad will happen
-    NS_ASSERT(m_sentList.empty());
-    m_highestSack = std::make_pair(m_sentList.end(), SequenceNumber32(0));
+    NS_ASSERT(m_sentBuf.empty());
+    m_highestSackIter = m_sentBuf.end();
+    m_nextSegLostHint = m_sentBuf.end();
+}
+
+uint32_t
+TcpTxBuffer::GetSentSize() const
+{
+    return m_sentSize;
+}
+
+const TcpTxItem*
+TcpTxBuffer::GetHeadItem()
+{
+    if (m_sentBuf.empty())
+    {
+        return nullptr;
+    }
+    else
+    {
+        return m_sentBuf.begin()->second;
+    }
 }
 
 bool
@@ -271,6 +299,11 @@ TcpTxBuffer::CopyFromSequence(uint32_t numBytes, const SequenceNumber32& seq)
     }
 
     outItem->m_lastSent = Simulator::Now();
+    if (outItem->m_tsortedAnchor.has_value()) {
+        m_tsortedItemList.erase(outItem->m_tsortedAnchor.value());
+    }
+    m_tsortedItemList.push_back(outItem);
+    outItem->m_tsortedAnchor = std::prev(m_tsortedItemList.end());
     NS_ASSERT_MSG(outItem->m_startSeq >= m_firstByteSeq,
                   "Returning an item " << *outItem << " with SND.UNA as " << m_firstByteSeq);
     ConsistencyCheck();
@@ -287,17 +320,35 @@ TcpTxBuffer::GetNewSegment(uint32_t numBytes)
     NS_LOG_INFO("AppList start at " << startOfAppList << ", sentSize = " << m_sentSize
                                     << " firstByte: " << m_firstByteSeq);
 
-    TcpTxItem* item = GetPacketFromList(m_appList, startOfAppList, numBytes, startOfAppList);
+    NS_ASSERT(!m_appList.empty());
+
+    TcpTxItem* item = *(m_appList.begin());
+    while (item->m_packet->GetSize() < numBytes)
+    {
+        auto it = std::next(m_appList.begin());
+        if (it == m_appList.end())
+        {
+            break;
+        }
+        TcpTxItem* nextItem = *it;
+        MergeItems(item, nextItem);
+        m_appList.erase(it);
+        delete nextItem;
+    }
+    if (numBytes < item->m_packet->GetSize())
+    {
+        auto* firstPart = new TcpTxItem();
+        SplitItems(firstPart, item, numBytes);
+        item = firstPart;
+    }
+    else
+    {
+        m_appList.pop_front();
+    }
+
     item->m_startSeq = startOfAppList;
-
-    // Move item from AppList to SentList (should be the first, not too complex)
-    auto it = std::find(m_appList.begin(), m_appList.end(), item);
-    NS_ASSERT(it != m_appList.end());
-
-    m_appList.erase(it);
-    m_sentList.insert(m_sentList.end(), item);
+    m_sentBuf.emplace_hint(m_sentBuf.end(), startOfAppList, item);
     m_sentSize += item->m_packet->GetSize();
-
     return item;
 }
 
@@ -307,43 +358,36 @@ TcpTxBuffer::GetTransmittedSegment(uint32_t numBytes, const SequenceNumber32& se
     NS_LOG_FUNCTION(this << numBytes << seq);
     NS_ASSERT(seq >= m_firstByteSeq);
     NS_ASSERT(numBytes <= m_sentSize);
-    NS_ASSERT(!m_sentList.empty());
+    NS_ASSERT(!m_sentBuf.empty());
 
-    auto it = m_sentList.begin();
-    bool listEdited = false;
     uint32_t s = numBytes;
-
-    // Avoid to merge different packet for this retransmission if flags are
-    // different.
-    for (; it != m_sentList.end(); ++it)
+    auto it = m_sentBuf.find(seq);
+    if (it != m_sentBuf.end())
     {
-        if ((*it)->m_startSeq == seq)
+        TcpTxItem* currItem = it->second;
+        auto next = std::next(it);
+        if (next != m_sentBuf.end())
         {
-            auto next = it;
-            next++;
-            if (next != m_sentList.end())
+            // Next is not sacked and have the same value for m_lost ... there is the
+            // possibility to merge
+            TcpTxItem* nextItem = next->second;
+            if ((!nextItem->m_sacked) && (currItem->m_lost == nextItem->m_lost))
             {
-                // Next is not sacked and have the same value for m_lost ... there is the
-                // possibility to merge
-                if ((!(*next)->m_sacked) && ((*it)->m_lost == (*next)->m_lost))
-                {
-                    s = std::min(s, (*it)->m_packet->GetSize() + (*next)->m_packet->GetSize());
-                }
-                else
-                {
-                    // Next is sacked... better to retransmit only the first segment
-                    s = std::min(s, (*it)->m_packet->GetSize());
-                }
+                s = std::min(s, currItem->m_packet->GetSize() + nextItem->m_packet->GetSize());
             }
             else
             {
-                s = std::min(s, (*it)->m_packet->GetSize());
+                // Next is sacked... better to retransmit only the first segment
+                s = std::min(s, currItem->m_packet->GetSize());
             }
-            break;
+        }
+        else
+        {
+            s = std::min(s, currItem->m_packet->GetSize());
         }
     }
 
-    TcpTxItem* item = GetPacketFromList(m_sentList, m_firstByteSeq, s, seq, &listEdited);
+    TcpTxItem* item = GetPacketFromSentBuf(s, seq);
 
     if (!item->m_retrans)
     {
@@ -351,33 +395,13 @@ TcpTxBuffer::GetTransmittedSegment(uint32_t numBytes, const SequenceNumber32& se
         item->m_retrans = true;
     }
 
+    m_totalRetrans += item->m_packet->GetSize();
+
     return item;
 }
 
-std::pair<TcpTxBuffer::PacketList::const_iterator, SequenceNumber32>
-TcpTxBuffer::FindHighestSacked() const
-{
-    NS_LOG_FUNCTION(this);
-
-    SequenceNumber32 beginOfCurrentPacket = m_firstByteSeq;
-
-    auto ret = std::make_pair(m_sentList.end(), SequenceNumber32(0));
-
-    for (auto it = m_sentList.begin(); it != m_sentList.end(); ++it)
-    {
-        const TcpTxItem* item = *it;
-        if (item->m_sacked)
-        {
-            ret = std::make_pair(it, beginOfCurrentPacket);
-        }
-        beginOfCurrentPacket += item->m_packet->GetSize();
-    }
-
-    return ret;
-}
-
 void
-TcpTxBuffer::SplitItems(TcpTxItem* t1, TcpTxItem* t2, uint32_t size) const
+TcpTxBuffer::SplitItems(TcpTxItem* t1, TcpTxItem* t2, uint32_t size)
 {
     NS_ASSERT(t1 != nullptr && t2 != nullptr);
     NS_LOG_FUNCTION(this << *t2 << size);
@@ -390,18 +414,28 @@ TcpTxBuffer::SplitItems(TcpTxItem* t1, TcpTxItem* t2, uint32_t size) const
     t1->m_lastSent = t2->m_lastSent;
     t1->m_retrans = t2->m_retrans;
     t1->m_lost = t2->m_lost;
-
+    t1->m_rttNotReliable = t2->m_rttNotReliable;
     t2->m_startSeq += size;
+
+    if (t1->m_sacked) {
+        m_sackedPkts++;
+    }
+
+    if (m_nextSegLostHint != m_sentBuf.end() && m_nextSegLostHint->second == t2)
+    {
+        m_nextSegLostHint = m_sentBuf.begin();
+    }
+
+    if (t2->m_tsortedAnchor.has_value()) {
+        m_tsortedItemList.erase(t2->m_tsortedAnchor.value());
+        t2->m_tsortedAnchor.reset();
+    }
 
     NS_LOG_INFO("Split of size " << size << " result: t1 " << *t1 << " t2 " << *t2);
 }
 
 TcpTxItem*
-TcpTxBuffer::GetPacketFromList(PacketList& list,
-                               const SequenceNumber32& listStartFrom,
-                               uint32_t numBytes,
-                               const SequenceNumber32& seq,
-                               bool* listEdited) const
+TcpTxBuffer::GetPacketFromSentBuf(uint32_t numBytes, const SequenceNumber32& seq)
 {
     NS_LOG_FUNCTION(this << numBytes << seq);
 
@@ -432,159 +466,84 @@ TcpTxBuffer::GetPacketFromList(PacketList& list,
      * while maxBytes is the end of some packet next in the list).
      */
 
-    Ptr<Packet> currentPacket = nullptr;
-    TcpTxItem* currentItem = nullptr;
-    TcpTxItem* outItem = nullptr;
-    auto it = list.begin();
-    SequenceNumber32 beginOfCurrentPacket = listStartFrom;
-
-    while (it != list.end())
+    auto it = m_sentBuf.upper_bound(seq); // the first that startSeq > seq
+    NS_ASSERT_MSG(it != m_sentBuf.begin(), "There is no packet containing" << seq);
+    it--;
+    TcpTxItem* item = it->second; // seq >= item->m_startSeq
+    Ptr<Packet> packet = item->m_packet;
+    SequenceNumber32 beginOfPacket = it->first;
+    if (seq == beginOfPacket)
     {
-        currentItem = *it;
-        currentPacket = currentItem->m_packet;
-        NS_ASSERT_MSG(list != m_sentList || currentItem->m_startSeq >= m_firstByteSeq,
-                      "start: " << m_firstByteSeq
-                                << " currentItem start: " << currentItem->m_startSeq);
-
-        // The objective of this snippet is to find (or to create) the packet
-        // that begin with the sequence seq
-
-        if (seq < beginOfCurrentPacket + currentPacket->GetSize())
-        {
-            // seq is inside the current packet
-            if (seq == beginOfCurrentPacket)
-            {
-                // seq is the beginning of the current packet. Hurray!
-                outItem = currentItem;
-                NS_LOG_INFO("Current packet starts at seq " << seq << " ends at "
-                                                            << seq + currentPacket->GetSize());
-            }
-            else if (seq > beginOfCurrentPacket)
-            {
-                // seq is inside the current packet but seq is not the beginning,
-                // it's somewhere in the middle. Just fragment the beginning and
-                // start again.
-                NS_LOG_INFO("we are at " << beginOfCurrentPacket << " searching for " << seq
-                                         << " and now we recurse because packet ends at "
-                                         << beginOfCurrentPacket + currentPacket->GetSize());
-                auto firstPart = new TcpTxItem();
-                SplitItems(firstPart, currentItem, seq - beginOfCurrentPacket);
-
-                // insert firstPart before currentItem
-                list.insert(it, firstPart);
-                if (listEdited)
-                {
-                    *listEdited = true;
-                }
-
-                return GetPacketFromList(list, listStartFrom, numBytes, seq, listEdited);
-            }
-            else
-            {
-                NS_FATAL_ERROR("seq < beginOfCurrentPacket: our data is before");
-            }
-        }
-        else
-        {
-            // Walk the list, the current packet does not contain seq
-            beginOfCurrentPacket += currentPacket->GetSize();
-            it++;
-            continue;
-        }
-
-        NS_ASSERT(outItem != nullptr);
-
-        // The objective of this snippet is to find (or to create) the packet
-        // that ends after numBytes bytes. We are sure that outPacket starts
-        // at seq.
-
-        if (seq + numBytes <= beginOfCurrentPacket + currentPacket->GetSize())
-        {
-            // the end boundary is inside the current packet
-            if (numBytes == currentPacket->GetSize())
-            {
-                // the end boundary is exactly the end of the current packet. Hurray!
-                if (currentItem->m_packet == outItem->m_packet)
-                {
-                    // A perfect match!
-                    return outItem;
-                }
-                else
-                {
-                    // the end is exactly the end of current packet, but
-                    // current > outPacket in the list. Merge current with the
-                    // previous, and recurse.
-                    NS_ASSERT(it != list.begin());
-                    TcpTxItem* previous = *(--it);
-
-                    list.erase(it);
-
-                    MergeItems(previous, currentItem);
-                    delete currentItem;
-                    if (listEdited)
-                    {
-                        *listEdited = true;
-                    }
-
-                    return GetPacketFromList(list, listStartFrom, numBytes, seq, listEdited);
-                }
-            }
-            else if (numBytes < currentPacket->GetSize())
-            {
-                // the end is inside the current packet, but it isn't exactly
-                // the packet end. Just fragment, fix the list, and return.
-                auto firstPart = new TcpTxItem();
-                SplitItems(firstPart, currentItem, numBytes);
-
-                // insert firstPart before currentItem
-                list.insert(it, firstPart);
-                if (listEdited)
-                {
-                    *listEdited = true;
-                }
-
-                return firstPart;
-            }
-        }
-        else
-        {
-            // The end isn't inside current packet, but there is an exception for
-            // the merge and recurse strategy...
-            if (++it == list.end())
-            {
-                // ...current is the last packet we sent. We have not more data;
-                // Go for this one.
-                NS_LOG_WARN("Cannot reach the end, but this case is covered "
-                            "with conditional statements inside CopyFromSequence."
-                            "Something has gone wrong, report a bug");
-                return outItem;
-            }
-
-            // The current packet does not contain the requested end. Merge current
-            // with the packet that follows, and recurse
-            TcpTxItem* next = (*it); // Please remember we have incremented it
-                                     // in the previous if
-
-            MergeItems(currentItem, next);
-            list.erase(it);
-
-            delete next;
-
-            if (listEdited)
-            {
-                *listEdited = true;
-            }
-
-            return GetPacketFromList(list, listStartFrom, numBytes, seq, listEdited);
-        }
+        // seq is the beginning of the current packet. Hurray!
+        NS_LOG_INFO("Current packet starts at seq " << seq << " ends at "
+                                                    << seq + packet->GetSize());
+    }
+    else
+    {
+        // seq is inside the current packet but seq is not the beginning,
+        // it's somewhere in the middle. Just fragment the beginning and
+        // start again.
+        NS_LOG_INFO("we are at " << beginOfPacket << " searching for " << seq
+                                    << " and now we recurse because packet ends at "
+                                    << beginOfPacket + packet->GetSize());
+        auto* firstPart = new TcpTxItem();
+        SplitItems(firstPart, item, seq - beginOfPacket);
+        it->second = firstPart;
+        it = m_sentBuf.emplace_hint(std::next(it), seq, item);
+        beginOfPacket = seq;
     }
 
-    NS_FATAL_ERROR("This point is not reachable");
-    return nullptr; // Silence compiler warning about lack of return value
+    // The objective of this snippet is to find (or to create) the packet
+    // that ends after numBytes bytes. We are sure that outPacket starts
+    // at seq.
+    if (numBytes <= packet->GetSize())
+    {
+        // the end boundary is inside the current packet
+        if (numBytes == packet->GetSize())
+        {
+            return item;
+        }
+        else
+        {
+            // the end is inside the current packet, but it isn't exactly
+            // the packet end. Just fragment, fix the list, and return.
+            auto* firstPart = new TcpTxItem();
+            SplitItems(firstPart, item, numBytes);
+            it->second = firstPart;
+            it = m_sentBuf.emplace_hint(std::next(it), item->m_startSeq, item);
+            return firstPart;
+        }
+    }
+    else
+    {
+        // The end isn't inside current packet, but there is an exception for
+        // the merge and recurse strategy...
+        it++;
+        if (it == m_sentBuf.end())
+        {
+            // ...current is the last packet we sent. We have not more data;
+            // Go for this one.
+            NS_LOG_WARN("Cannot reach the end, but this case is covered "
+                        "with conditional statements inside CopyFromSequence."
+                        "Something has gone wrong, report a bug");
+            return item;
+        }
+
+        // The current packet does not contain the requested end. Merge current
+        // with the packet that follows, and recurse
+        TcpTxItem* next = it->second; // Please remember we have incremented it
+
+        MergeItems(item, next);
+        m_sentBuf.erase(it);
+
+        delete next;
+
+        return GetPacketFromSentBuf(numBytes, seq);
+    }
 }
 
 void
-TcpTxBuffer::MergeItems(TcpTxItem* t1, TcpTxItem* t2) const
+TcpTxBuffer::MergeItems(TcpTxItem* t1, TcpTxItem* t2)
 {
     NS_ASSERT(t1 != nullptr && t2 != nullptr);
     NS_LOG_FUNCTION(this << *t1 << *t2);
@@ -621,6 +580,26 @@ TcpTxBuffer::MergeItems(TcpTxItem* t1, TcpTxItem* t2) const
 
     t1->m_packet->AddAtEnd(t2->m_packet);
 
+    if (m_nextSegLostHint != m_sentBuf.end() && m_nextSegLostHint->second == t2)
+    {
+        m_nextSegLostHint = m_sentBuf.begin();
+    }
+
+    if (t2->m_tsortedAnchor.has_value())
+    {
+        m_tsortedItemList.erase(t2->m_tsortedAnchor.value());
+        t2->m_tsortedAnchor.reset();
+    }
+
+    if (t2->m_sacked) {
+        m_sackedPkts--;
+    }
+
+    if (t1->m_rttNotReliable || t2->m_rttNotReliable) {
+        t1->m_rttNotReliable = true;
+        t2->m_rttNotReliable = true;
+    }
+
     NS_LOG_INFO("Situation after the merge: " << *t1);
 }
 
@@ -631,6 +610,7 @@ TcpTxBuffer::RemoveFromCounts(TcpTxItem* item, uint32_t size)
     if (item->m_sacked)
     {
         NS_ASSERT(m_sackedOut >= size);
+        m_sackedPkts--;
         m_sackedOut -= size;
     }
     if (item->m_retrans)
@@ -650,20 +630,19 @@ bool
 TcpTxBuffer::IsRetransmittedDataAcked(const SequenceNumber32& ack) const
 {
     NS_LOG_FUNCTION(this);
-    for (const auto& it : m_sentList)
-    {
-        TcpTxItem* item = it;
-        Ptr<Packet> p = item->m_packet;
-        if (item->m_startSeq + p->GetSize() == ack && !item->m_sacked && item->m_retrans)
-        {
-            return true;
-        }
+    auto it = m_sentBuf.find(ack);
+    if (it == m_sentBuf.begin()) {
+        return false;
     }
-    return false;
+
+    it--;
+    TcpTxItem* item = it->second;
+    Ptr<Packet> p = item->m_packet;
+    return (item->m_startSeq + p->GetSize() == ack && !item->m_sacked && item->m_retrans);
 }
 
 void
-TcpTxBuffer::DiscardUpTo(const SequenceNumber32& seq, const Callback<void, TcpTxItem*>& beforeDelCb)
+TcpTxBuffer::DiscardUpTo(Ptr<TcpSocketState> tcb, const SequenceNumber32& seq, const Callback<void, TcpTxItem*>& beforeDelCb)
 {
     NS_LOG_FUNCTION(this << seq);
 
@@ -676,24 +655,39 @@ TcpTxBuffer::DiscardUpTo(const SequenceNumber32& seq, const Callback<void, TcpTx
     NS_LOG_DEBUG("Remove up to " << seq << " lost: " << m_lostOut << " retrans: " << m_retrans
                                  << " sacked: " << m_sackedOut);
 
+    SequenceNumber32 highestSackSeq{0};
+    if (m_highestSackIter != m_sentBuf.end())
+    {
+        highestSackSeq = m_highestSackIter->first;
+    }
+
+    SequenceNumber32 nextSegLostHintSeq;
+    if (m_nextSegLostHint != m_sentBuf.end())
+    {
+        nextSegLostHintSeq = m_nextSegLostHint->first;
+    }
+    else
+    {
+        nextSegLostHintSeq = m_firstByteSeq + m_sentSize;
+    }
+
     // Scan the buffer and discard packets
     uint32_t offset = seq - m_firstByteSeq.Get(); // Number of bytes to remove
-    uint32_t pktSize;
-    auto i = m_sentList.begin();
+    auto i = m_sentBuf.begin();
     while (m_size > 0 && offset > 0)
     {
-        if (i == m_sentList.end())
+        if (i == m_sentBuf.end())
         {
             // Move data from app list to sent list, so we can delete the item
             Ptr<Packet> p [[maybe_unused]] =
                 CopyFromSequence(offset, m_firstByteSeq)->GetPacketCopy();
             NS_ASSERT(p);
-            i = m_sentList.begin();
-            NS_ASSERT(i != m_sentList.end());
+            i = m_sentBuf.begin();
+            NS_ASSERT(i != m_sentBuf.end());
         }
-        TcpTxItem* item = *i;
+        TcpTxItem* item = i->second;
         Ptr<Packet> p = item->m_packet;
-        pktSize = p->GetSize();
+        uint32_t pktSize = p->GetSize();
         NS_ASSERT_MSG(item->m_startSeq == m_firstByteSeq,
                       "Item starts at " << item->m_startSeq << " while SND.UNA is "
                                         << m_firstByteSeq << " from " << *this);
@@ -705,17 +699,22 @@ TcpTxBuffer::DiscardUpTo(const SequenceNumber32& seq, const Callback<void, TcpTx
             offset -= pktSize;
             m_firstByteSeq += pktSize;
 
-            RemoveFromCounts(item, pktSize);
-
-            i = m_sentList.erase(i);
-            NS_LOG_INFO("Removed " << *item << " lost: " << m_lostOut << " retrans: " << m_retrans
-                                   << " sacked: " << m_sackedOut << ". Remaining data " << m_size);
-
             if (!beforeDelCb.IsNull())
             {
                 // Inform Rate algorithms only when a full packet is ACKed
                 beforeDelCb(item);
             }
+
+            rackUpdateMostRecent(tcb, item);
+            RemoveFromCounts(item, pktSize);
+            if (item->m_tsortedAnchor.has_value())
+            {
+                m_tsortedItemList.erase(item->m_tsortedAnchor.value());
+            }
+
+            i = m_sentBuf.erase(i);
+            NS_LOG_INFO("Removed " << *item << " lost: " << m_lostOut << " retrans: " << m_retrans
+                                   << " sacked: " << m_sackedOut << ". Remaining data " << m_size);
 
             delete item;
         }
@@ -726,6 +725,8 @@ TcpTxBuffer::DiscardUpTo(const SequenceNumber32& seq, const Callback<void, TcpTx
             // PacketTags are preserved when fragmenting
             item->m_packet = item->m_packet->CreateFragment(offset, pktSize);
             item->m_startSeq += offset;
+            m_sentBuf.emplace_hint(std::next(i), item->m_startSeq, item);
+            i = m_sentBuf.erase(i);
             m_size -= offset;
             m_sentSize -= offset;
             m_firstByteSeq += offset;
@@ -744,9 +745,9 @@ TcpTxBuffer::DiscardUpTo(const SequenceNumber32& seq, const Callback<void, TcpTx
         m_firstByteSeq = seq;
     }
 
-    if (!m_sentList.empty())
+    if (!m_sentBuf.empty())
     {
-        TcpTxItem* head = m_sentList.front();
+        TcpTxItem* head = m_sentBuf.begin()->second;
         if (head->m_sacked)
         {
             NS_ASSERT(!head->m_lost);
@@ -754,6 +755,7 @@ TcpTxBuffer::DiscardUpTo(const SequenceNumber32& seq, const Callback<void, TcpTx
             // have been ACKed. This is, most likely, our wrong guessing
             // when adding Reno dupacks in the count.
             head->m_sacked = false;
+            m_sackedPkts--;
             m_sackedOut -= head->m_packet->GetSize();
             NS_LOG_INFO("Moving the SACK flag from the HEAD to another segment");
             AddRenoSack();
@@ -765,9 +767,13 @@ TcpTxBuffer::DiscardUpTo(const SequenceNumber32& seq, const Callback<void, TcpTx
                                               << " this is the result: " << *this);
     }
 
-    if (m_highestSack.second <= m_firstByteSeq)
+    if (highestSackSeq <= m_firstByteSeq)
     {
-        m_highestSack = std::make_pair(m_sentList.end(), SequenceNumber32(0));
+        m_highestSackIter = m_sentBuf.end();
+    }
+    if (nextSegLostHintSeq < m_firstByteSeq)
+    {
+        m_nextSegLostHint = m_sentBuf.begin();
     }
 
     NS_LOG_DEBUG("Discarded up to " << seq << " lost: " << m_lostOut << " retrans: " << m_retrans
@@ -779,92 +785,123 @@ TcpTxBuffer::DiscardUpTo(const SequenceNumber32& seq, const Callback<void, TcpTx
 }
 
 uint32_t
-TcpTxBuffer::Update(const TcpOptionSack::SackList& list, const Callback<void, TcpTxItem*>& sackedCb)
+TcpTxBuffer::SackBlockUpdate(Ptr<TcpSocketState> tcb, TcpOptionSack::SackBlock block, const Callback<void, TcpTxItem*>& sackedCb)
+{
+    uint32_t bytesSacked = 0;
+    auto [startSeq, endSeq] = block;
+    auto itemIt = m_sentBuf.lower_bound(startSeq);
+    for (; itemIt != m_sentBuf.end(); itemIt++)
+    {
+        TcpTxItem* item = itemIt->second;
+        uint32_t pktSize = item->m_packet->GetSize();
+        SequenceNumber32 endOfCurrentPacket = itemIt->first + pktSize;
+
+        // only mark as sacked if it is precisely mapped over the option.
+        // It means that if the receiver is reporting as sacked single range bytes
+        // that are not mapped 1:1 in what we have, the option is discarded.
+        // There's room for improvement here.
+        if (endOfCurrentPacket > endSeq)
+        {
+            break;
+        }
+
+        if (item->m_sacked)
+        {
+            NS_LOG_INFO("Received block " << block << ", checking sentList for block "
+                                            << item
+                                            << ", found in the sackboard already sacked");
+            continue;
+        }
+
+        if (!sackedCb.IsNull())
+        {
+            sackedCb(item);
+        }
+
+        rackUpdateMostRecent(tcb, item);
+
+        if (item->m_retrans) {
+            item->m_retrans = false;
+            m_retrans -= item->m_packet->GetSize();
+        }
+
+        if (item->m_lost)
+        {
+            item->m_lost = false;
+            m_lostOut -= item->m_packet->GetSize();
+        }
+
+        item->m_sacked = true;
+        if (item->m_tsortedAnchor.has_value())
+        {
+            m_tsortedItemList.erase(item->m_tsortedAnchor.value());
+            item->m_tsortedAnchor.reset();
+        }
+        m_sackedPkts++;
+        m_sackedOut += item->m_packet->GetSize();
+        bytesSacked += item->m_packet->GetSize();
+
+        if (m_highestSackIter == m_sentBuf.end() || m_highestSackIter->first <= endOfCurrentPacket)
+        {
+            m_highestSackIter = itemIt;
+        }
+
+        NS_LOG_INFO("Received block "
+                    << block << ", checking sentList for block " << item
+                    << ", found in the sackboard, sacking, current highSack: "
+                    << m_highestSackIter->first);
+    }
+    return bytesSacked;
+}
+
+uint32_t
+TcpTxBuffer::Update(Ptr<TcpSocketState> tcb, TcpOptionSack::SackList list, const Callback<void, TcpTxItem*>& sackedCb)
 {
     NS_LOG_FUNCTION(this);
     NS_LOG_INFO("Updating scoreboard, got " << list.size() << " blocks to analyze");
 
     uint32_t bytesSacked = 0;
 
-    for (auto option_it = list.begin(); option_it != list.end(); ++option_it)
+    std::sort(list.begin(), list.end());
+    auto cacheIt = m_recvSackCache.begin();
+    for (auto sackIt = list.begin(); sackIt != list.end(); ++sackIt)
     {
-        auto item_it = m_sentList.begin();
-        SequenceNumber32 beginOfCurrentPacket = m_firstByteSeq;
+        auto [startSeq, endSeq] = *sackIt;
 
-        if (m_firstByteSeq + m_sentSize < (*option_it).first)
-        {
-            NS_LOG_INFO("Not updating scoreboard, the option block is outside the sent list");
-            return bytesSacked;
-        }
-
-        while (item_it != m_sentList.end())
-        {
-            uint32_t pktSize = (*item_it)->m_packet->GetSize();
-
-            // Check the boundary of this packet ... only mark as sacked if
-            // it is precisely mapped over the option. It means that if the receiver
-            // is reporting as sacked single range bytes that are not mapped 1:1
-            // in what we have, the option is discarded. There's room for improvement
-            // here.
-            if (beginOfCurrentPacket >= (*option_it).first &&
-                beginOfCurrentPacket + pktSize <= (*option_it).second)
-            {
-                if ((*item_it)->m_sacked)
-                {
-                    NS_ASSERT(!(*item_it)->m_lost);
-                    NS_LOG_INFO("Received block " << *option_it << ", checking sentList for block "
-                                                  << *(*item_it)
-                                                  << ", found in the sackboard already sacked");
-                }
-                else
-                {
-                    if ((*item_it)->m_lost)
-                    {
-                        (*item_it)->m_lost = false;
-                        m_lostOut -= (*item_it)->m_packet->GetSize();
-                    }
-
-                    (*item_it)->m_sacked = true;
-                    m_sackedOut += (*item_it)->m_packet->GetSize();
-                    bytesSacked += (*item_it)->m_packet->GetSize();
-
-                    if (m_highestSack.first == m_sentList.end() ||
-                        m_highestSack.second <= beginOfCurrentPacket + pktSize)
-                    {
-                        m_highestSack = std::make_pair(item_it, beginOfCurrentPacket);
-                    }
-
-                    NS_LOG_INFO("Received block "
-                                << *option_it << ", checking sentList for block " << *(*item_it)
-                                << ", found in the sackboard, sacking, current highSack: "
-                                << m_highestSack.second);
-
-                    if (!sackedCb.IsNull())
-                    {
-                        sackedCb(*item_it);
-                    }
-                }
+        while (cacheIt != m_recvSackCache.end()) {
+            while (cacheIt != m_recvSackCache.end() && startSeq >= cacheIt->second) {
+                cacheIt++;
             }
-            else if (beginOfCurrentPacket + pktSize > (*option_it).second)
-            {
-                // We already passed the received block end. Exit from the loop
-                NS_LOG_INFO("Received block [" << *option_it << ", checking sentList for block "
-                                               << *(*item_it) << "], not found, breaking loop");
+            if (cacheIt != m_recvSackCache.end() && endSeq > cacheIt->first) {
+                if (startSeq < cacheIt->first) {
+                    bytesSacked += SackBlockUpdate(tcb, {startSeq, cacheIt->first}, sackedCb);
+                    startSeq = cacheIt->second; // skip cached (already processed) SACK block
+                }
+                if (endSeq <= cacheIt->second) {
+                    break; // There is no further cache that overlaps with current block
+                }
+                cacheIt++;
+            } else {
                 break;
             }
-
-            beginOfCurrentPacket += pktSize;
-            ++item_it;
         }
+
+        if (startSeq >= endSeq) {
+            continue;
+        }
+
+        bytesSacked += SackBlockUpdate(tcb, {startSeq, endSeq}, sackedCb);
     }
+
+    m_recvSackCache.swap(list);
 
     if (bytesSacked > 0)
     {
-        NS_ASSERT_MSG(m_highestSack.first != m_sentList.end(), "Buffer status: " << *this);
-        UpdateLostCount();
+        NS_ASSERT_MSG(m_highestSackIter != m_sentBuf.end(), "Buffer status: " << *this);
+        UpdateLostCount(tcb);
     }
 
-    NS_ASSERT((*(m_sentList.begin()))->m_sacked == false);
+    NS_ASSERT(m_sentBuf.begin()->second->m_sacked == false);
     NS_ASSERT_MSG(m_sentSize >= m_sackedOut + m_lostOut, *this);
     // NS_ASSERT (list.size () == 0 || modified);   // Assert for duplicated SACK or
     //  impossiblity to map the option into the sent blocks
@@ -873,50 +910,101 @@ TcpTxBuffer::Update(const TcpOptionSack::SackList& list, const Callback<void, Tc
 }
 
 void
-TcpTxBuffer::UpdateLostCount()
+TcpTxBuffer::rackUpdateMostRecent(Ptr<TcpSocketState> tcb, TcpTxItem* item)
+{
+    if (item->m_rttNotReliable) {
+        return;
+    }
+
+    SequenceNumber32 endSeq = item->m_startSeq + item->m_packet->GetSize();
+    Time xmitTs = item->m_lastSent;
+    Time rtt = Simulator::Now() - xmitTs;
+    if (rtt < tcb->m_minRtt && item->m_retrans) {
+        return;
+    }
+
+    if (std::pair{xmitTs, endSeq} > std::pair{m_rackXmitTs, m_rackEndSeq}) {
+        m_rackXmitTs = xmitTs;
+        m_rackEndSeq = endSeq;
+        m_rackRtt = rtt;
+    }
+}
+
+void
+TcpTxBuffer::UpdateLostCount(Ptr<TcpSocketState> tcb)
 {
     NS_LOG_FUNCTION(this);
-    uint32_t sacked = 0;
-    SequenceNumber32 beginOfCurrentPacket = m_highestSack.second;
-    if (m_highestSack.first == m_sentList.end())
-    {
-        NS_LOG_INFO("Status before the update: " << *this
-                                                 << ", will start from the latest sent item");
-    }
-    else
-    {
-        NS_LOG_INFO("Status before the update: " << *this << ", will start from item "
-                                                 << *(*m_highestSack.first));
+
+    Time reorderWindow;
+    if (tcb->m_congState.Get() == TcpSocketState::CA_RECOVERY || tcb->m_congState.Get() == TcpSocketState::CA_LOSS) {
+        reorderWindow = Time{0};
+    } else if (m_sackedPkts >= 3) {
+        reorderWindow = Time{0};
+    } else {
+        reorderWindow = std::min(tcb->m_minRtt / 4, tcb->m_sRtt.Get() / 8);
     }
 
-    for (auto it = m_highestSack.first; it != m_sentList.begin(); --it)
+    TcpTxItem* lowestLostItem = nullptr;
+
+    auto it = m_tsortedItemList.begin();
+    while (it != m_tsortedItemList.end())
     {
         TcpTxItem* item = *it;
-        if (item->m_sacked)
+        if (item->m_lost && !item->m_retrans)
         {
-            sacked++;
+            it++;
+            continue;
+        }
+        SequenceNumber32 itemEndSeq = item->m_startSeq + item->m_packet->GetSize();
+        if (std::pair{item->m_lastSent, itemEndSeq} >= std::pair{m_rackXmitTs, m_rackEndSeq})
+        {
+            break;
         }
 
-        if (sacked >= m_dupAckThresh)
+        Time remaining = m_rackRtt + reorderWindow - Simulator::Now() + item->m_lastSent;
+        if (remaining.IsNegative())
         {
-            if (!item->m_sacked && !item->m_lost)
+            if (item->m_lost)
             {
+                if (item->m_retrans)
+                {
+                    item->m_retrans = false;
+                    m_retrans -= item->m_packet->GetSize();
+                    m_totalLost += item->m_packet->GetSize();
+                }
+            }
+            else
+            {
+                NS_ASSERT(!item->m_sacked);
                 item->m_lost = true;
                 m_lostOut += item->m_packet->GetSize();
+                m_totalLost += item->m_packet->GetSize();
+            }
+
+            it = m_tsortedItemList.erase(it);
+            item->m_tsortedAnchor.reset();
+
+            if (lowestLostItem == nullptr || item->m_startSeq < lowestLostItem->m_startSeq)
+            {
+                lowestLostItem = item;
             }
         }
-        beginOfCurrentPacket -= item->m_packet->GetSize();
-    }
-
-    if (sacked >= m_dupAckThresh)
-    {
-        TcpTxItem* item = *m_sentList.begin();
-        if (!item->m_lost)
+        else
         {
-            item->m_lost = true;
-            m_lostOut += item->m_packet->GetSize();
+            it++;
         }
     }
+
+    if (lowestLostItem != nullptr)
+    {
+        if (m_nextSegLostHint == m_sentBuf.end() ||
+            lowestLostItem->m_startSeq < m_nextSegLostHint->first)
+        {
+            m_nextSegLostHint = m_sentBuf.find(lowestLostItem->m_startSeq);
+            NS_ASSERT(m_nextSegLostHint != m_sentBuf.end());
+        }
+    }
+
     NS_LOG_INFO("Status after the update: " << *this);
     ConsistencyCheck();
 }
@@ -926,29 +1014,32 @@ TcpTxBuffer::IsLost(const SequenceNumber32& seq) const
 {
     NS_LOG_FUNCTION(this << seq);
 
-    if (seq >= m_highestSack.second)
+    if (seq >= m_highestSackIter->first)
     {
         return false;
     }
 
-    // In theory, using a map and hints when inserting elements can improve
-    // performance
-    for (auto it = m_sentList.begin(); it != m_sentList.end(); ++it)
+    auto it = m_sentBuf.upper_bound(seq);
+    if (it == m_sentBuf.begin())
     {
-        // Search for the right iterator before calling IsLost()
-        if ((*it)->m_startSeq <= seq && seq < (*it)->m_startSeq + (*it)->m_packet->GetSize())
-        {
-            if ((*it)->m_lost)
-            {
-                NS_LOG_INFO("seq=" << seq << " is lost because of lost flag");
-                return true;
-            }
+        // no item satisfies item->m_startSeq <= seq
+        return false;
+    }
+    it--;
 
-            if ((*it)->m_sacked)
-            {
-                NS_LOG_INFO("seq=" << seq << " is not lost because of sacked flag");
-                return false;
-            }
+    TcpTxItem* item = it->second;
+    if (seq < it->first + item->m_packet->GetSize())
+    {
+        if (item->m_lost)
+        {
+            NS_LOG_INFO("seq=" << seq << " is lost because of lost flag");
+            return true;
+        }
+
+        if (item->m_sacked)
+        {
+            NS_LOG_INFO("seq=" << seq << " is not lost because of sacked flag");
+            return false;
         }
     }
 
@@ -956,7 +1047,7 @@ TcpTxBuffer::IsLost(const SequenceNumber32& seq) const
 }
 
 bool
-TcpTxBuffer::NextSeg(SequenceNumber32* seq, SequenceNumber32* seqHigh, bool isRecovery) const
+TcpTxBuffer::NextSeg(SequenceNumber32* seq, SequenceNumber32* seqHigh, bool isRecovery)
 {
     NS_LOG_FUNCTION(this << isRecovery);
     /* RFC 6675, NextSeg definition.
@@ -973,35 +1064,17 @@ TcpTxBuffer::NextSeg(SequenceNumber32* seq, SequenceNumber32* seqHigh, bool isRe
      *
      *     (1.c) IsLost (S2) returns true.
      */
-    TcpTxItem* item;
-    SequenceNumber32 seqPerRule3;
-    bool isSeqPerRule3Valid = false;
-    SequenceNumber32 beginOfCurrentPkt = m_firstByteSeq;
-
-    for (auto it = m_sentList.begin(); it != m_sentList.end(); ++it)
+    for (; m_nextSegLostHint != m_sentBuf.end(); m_nextSegLostHint++)
     {
-        item = *it;
-
+        TcpTxItem* item = m_nextSegLostHint->second;
         // Condition 1.a , 1.b , and 1.c
-        if (!item->m_retrans && !item->m_sacked)
+        if (item->m_lost && !item->m_retrans && !item->m_sacked)
         {
-            if (item->m_lost)
-            {
-                NS_LOG_INFO("IsLost, returning" << beginOfCurrentPkt);
-                *seq = beginOfCurrentPkt;
-                *seqHigh = *seq + m_segmentSize;
-                return true;
-            }
-            else if (seqPerRule3.GetValue() == 0 && isRecovery)
-            {
-                NS_LOG_INFO("Saving for rule 3 the seq " << beginOfCurrentPkt);
-                isSeqPerRule3Valid = true;
-                seqPerRule3 = beginOfCurrentPkt;
-            }
+            NS_LOG_INFO("IsLost, returning" << item->m_startSeq);
+            *seq = item->m_startSeq;
+            *seqHigh = *seq + m_segmentSize;
+            return true;
         }
-
-        // Nothing found, iterate
-        beginOfCurrentPkt += item->m_packet->GetSize();
     }
 
     /* (2) If no sequence number 'S2' per rule (1) exists but there
@@ -1036,12 +1109,21 @@ TcpTxBuffer::NextSeg(SequenceNumber32* seq, SequenceNumber32* seqHigh, bool isRe
      *     (specifically excluding step (1.c)), then one segment of up to
      *     SMSS octets starting with S3 SHOULD be returned.
      */
-    if (isSeqPerRule3Valid)
+    if (isRecovery)
     {
-        NS_LOG_INFO("Rule3 valid. " << seqPerRule3);
-        *seq = seqPerRule3;
-        *seqHigh = *seq + m_segmentSize;
-        return true;
+        for (auto it = m_sentBuf.begin(); it != m_sentBuf.end(); ++it)
+        {
+            TcpTxItem* item = it->second;
+            SequenceNumber32 beginOfCurrentPkt = it->first;
+            if (!item->m_retrans && !item->m_sacked)
+            {
+                NS_LOG_INFO("Rule3 valid. " << beginOfCurrentPkt);
+                item->m_rttNotReliable = true;
+                *seq = beginOfCurrentPkt;
+                *seqHigh = *seq + m_segmentSize;
+                return true;
+            }
+        }
     }
 
     /* (4) If the conditions for (1), (2), and (3) fail, but there exists
@@ -1081,142 +1163,19 @@ TcpTxBuffer::BytesInFlight() const
     return in_flight;
 }
 
-uint32_t
-TcpTxBuffer::BytesInFlightRFC() const
-{
-    TcpTxItem* item;
-    uint32_t size = 0; // "pipe" in RFC
-    SequenceNumber32 beginOfCurrentPkt = m_firstByteSeq;
-    uint32_t sackedOut = 0;
-    uint32_t lostOut = 0;
-    uint32_t retrans = 0;
-    uint32_t totalSize = 0;
-
-    // After initializing pipe to zero, the following steps are taken for each
-    // octet 'S1' in the sequence space between HighACK and HighData that has not
-    // been SACKed:
-    for (auto it = m_sentList.begin(); it != m_sentList.end(); ++it)
-    {
-        item = *it;
-        totalSize += item->m_packet->GetSize();
-        if (!item->m_sacked)
-        {
-            bool isLost = IsLostRFC(beginOfCurrentPkt, it);
-            // (a) If IsLost (S1) returns false: Pipe is incremented by 1 octet.
-            if (!isLost)
-            {
-                size += item->m_packet->GetSize();
-            }
-            // (b) If S1 <= HighRxt: Pipe is incremented by 1 octet.
-            // (NOTE: we use the m_retrans flag instead of keeping and updating
-            // another variable). Only if the item is not marked as lost
-            else if (item->m_retrans)
-            {
-                size += item->m_packet->GetSize();
-            }
-
-            if (isLost)
-            {
-                lostOut += item->m_packet->GetSize();
-            }
-        }
-        else
-        {
-            sackedOut += item->m_packet->GetSize();
-        }
-
-        if (item->m_retrans)
-        {
-            retrans += item->m_packet->GetSize();
-        }
-        beginOfCurrentPkt += item->m_packet->GetSize();
-    }
-
-    NS_ASSERT_MSG(lostOut == m_lostOut,
-                  "Lost counted: " << lostOut << " " << m_lostOut << "\n"
-                                   << *this);
-    NS_ASSERT_MSG(retrans == m_retrans,
-                  "Retrans Counted: " << retrans << " " << m_retrans << "\n"
-                                      << *this);
-    NS_ASSERT_MSG(sackedOut == m_sackedOut,
-                  "Sacked counted: " << sackedOut << " " << m_sackedOut << *this);
-    NS_ASSERT_MSG(totalSize == m_sentSize,
-                  "Sent size counted: " << totalSize << " " << m_sentSize << *this);
-
-    return size;
-}
-
-bool
-TcpTxBuffer::IsLostRFC(const SequenceNumber32& seq, const PacketList::const_iterator& segment) const
-{
-    NS_LOG_FUNCTION(this << seq);
-    uint32_t count = 0;
-    uint32_t bytes = 0;
-    PacketList::const_iterator it;
-    TcpTxItem* item;
-    Ptr<const Packet> current;
-    SequenceNumber32 beginOfCurrentPacket = seq;
-
-    if ((*segment)->m_sacked)
-    {
-        return false;
-    }
-
-    // From RFC 6675:
-    // > The routine returns true when either dupThresh discontiguous SACKed
-    // > sequences have arrived above 'seq' or more than (dupThresh - 1) * SMSS bytes
-    // > with sequence numbers greater than 'SeqNum' have been SACKed.  Otherwise, the
-    // > routine returns false.
-    for (it = segment; it != m_sentList.end(); ++it)
-    {
-        item = *it;
-        current = item->m_packet;
-
-        if (item->m_sacked)
-        {
-            NS_LOG_INFO("Segment " << *item << " found to be SACKed while checking for " << seq);
-            ++count;
-            bytes += current->GetSize();
-            if ((count >= m_dupAckThresh) || (bytes > (m_dupAckThresh - 1) * m_segmentSize))
-            {
-                NS_LOG_INFO("seq=" << seq << " is lost because of 3 sacked blocks ahead");
-                return true;
-            }
-        }
-
-        if (beginOfCurrentPacket >= m_highestSack.second)
-        {
-            if (item->m_lost && !item->m_retrans)
-            {
-                return true;
-            }
-
-            NS_LOG_INFO("seq=" << seq << " is not lost because there are no sacked segment ahead");
-            return false;
-        }
-
-        beginOfCurrentPacket += current->GetSize();
-    }
-    if (it == m_highestSack.first)
-    {
-        NS_LOG_INFO("seq=" << seq << " is not lost because there are no sacked segment ahead "
-                           << m_highestSack.second);
-    }
-    return false;
-}
-
 void
 TcpTxBuffer::ResetRenoSack()
 {
     NS_LOG_FUNCTION(this);
 
+    m_sackedPkts = 0;
     m_sackedOut = 0;
-    for (auto it = m_sentList.begin(); it != m_sentList.end(); ++it)
+    for (auto it = m_sentBuf.begin(); it != m_sentBuf.end(); ++it)
     {
-        (*it)->m_sacked = false;
+        it->second->m_sacked = false;
     }
 
-    m_highestSack = std::make_pair(m_sentList.end(), SequenceNumber32(0));
+    m_highestSackIter = m_sentBuf.end();
 }
 
 void
@@ -1227,41 +1186,22 @@ TcpTxBuffer::SetRWndCallback(Callback<uint32_t> rWndCallback)
 }
 
 void
-TcpTxBuffer::ResetSentList()
-{
-    NS_LOG_FUNCTION(this);
-    TcpTxItem* item;
-
-    // Keep the head items; they will then marked as lost
-    while (!m_sentList.empty())
-    {
-        item = m_sentList.back();
-        item->m_retrans = item->m_sacked = item->m_lost = false;
-        m_appList.push_front(item);
-        m_sentList.pop_back();
-    }
-
-    m_sentSize = 0;
-    m_lostOut = 0;
-    m_retrans = 0;
-    m_sackedOut = 0;
-    m_highestSack = std::make_pair(m_sentList.end(), SequenceNumber32(0));
-}
-
-void
 TcpTxBuffer::ResetLastSegmentSent()
 {
+    std::clog << "unexpected TcpTxBuffer::ResetLastSegmentSent()\n";
     NS_LOG_FUNCTION(this);
-    if (!m_sentList.empty())
+    if (!m_sentBuf.empty())
     {
-        TcpTxItem* item = m_sentList.back();
+        auto lastIt = std::prev(m_sentBuf.end());
+        TcpTxItem* item = lastIt->second;
 
-        m_sentList.pop_back();
+        m_sentBuf.erase(lastIt);
         m_sentSize -= item->m_packet->GetSize();
         if (item->m_retrans)
         {
             m_retrans -= item->m_packet->GetSize();
         }
+        item->m_rttNotReliable = true;
         m_appList.insert(m_appList.begin(), item);
     }
     ConsistencyCheck();
@@ -1275,39 +1215,50 @@ TcpTxBuffer::SetSentListLost(bool resetSack)
 
     if (resetSack)
     {
+        m_sackedPkts = 0;
         m_sackedOut = 0;
         m_lostOut = m_sentSize;
-        m_highestSack = std::make_pair(m_sentList.end(), SequenceNumber32(0));
+        m_highestSackIter = m_sentBuf.end();
     }
     else
     {
         m_lostOut = 0;
     }
 
-    for (auto it = m_sentList.begin(); it != m_sentList.end(); ++it)
+    for (auto it = m_sentBuf.begin(); it != m_sentBuf.end(); ++it)
     {
+        TcpTxItem* item = it->second;
         if (resetSack)
         {
-            (*it)->m_sacked = false;
-            (*it)->m_lost = true;
+            item->m_sacked = false;
+            item->m_lost = true;
         }
         else
         {
-            if ((*it)->m_lost)
+            if (item->m_lost)
             {
-                // Have to increment it because we set it to 0 at line 1133
-                m_lostOut += (*it)->m_packet->GetSize();
+                // Have to increment it because we set m_lostOut to 0 in the begining
+                m_lostOut += item->m_packet->GetSize();
             }
-            else if (!(*it)->m_sacked)
+            else if (!item->m_sacked)
             {
                 // Packet is not marked lost, nor is sacked. Then it becomes lost.
-                (*it)->m_lost = true;
-                m_lostOut += (*it)->m_packet->GetSize();
+                item->m_lost = true;
+                m_lostOut += item->m_packet->GetSize();
+                m_totalLost += item->m_packet->GetSize();
             }
         }
 
-        (*it)->m_retrans = false;
+        if (item->m_tsortedAnchor.has_value())
+        {
+            m_tsortedItemList.erase(item->m_tsortedAnchor.value());
+            item->m_tsortedAnchor.reset();
+        }
+        item->m_retrans = false;
+        item->m_rttNotReliable = true;
     }
+
+    m_nextSegLostHint = m_sentBuf.begin();
 
     NS_LOG_INFO("Set sent list lost, status: " << *this);
     NS_ASSERT_MSG(m_sentSize >= m_sackedOut + m_lostOut, *this);
@@ -1324,53 +1275,50 @@ TcpTxBuffer::IsHeadRetransmitted() const
         return false;
     }
 
-    return m_sentList.front()->m_retrans;
-}
-
-void
-TcpTxBuffer::DeleteRetransmittedFlagFromHead()
-{
-    NS_LOG_FUNCTION(this);
-
-    if (m_sentSize == 0)
-    {
-        return;
-    }
-
-    if (m_sentList.front()->m_retrans)
-    {
-        m_sentList.front()->m_retrans = false;
-        m_retrans -= m_sentList.front()->m_packet->GetSize();
-    }
-    ConsistencyCheck();
+    return m_sentBuf.begin()->second->m_retrans;
 }
 
 void
 TcpTxBuffer::MarkHeadAsLost()
 {
-    if (!m_sentList.empty())
+    if (m_sentBuf.empty())
     {
-        // If the head is sacked (reneging by the receiver the previously sent
-        // information) we revert the sacked flag.
-        // A sacked head means that we should advance SND.UNA.. so it's an error.
-        if (m_sentList.front()->m_sacked)
-        {
-            m_sentList.front()->m_sacked = false;
-            m_sackedOut -= m_sentList.front()->m_packet->GetSize();
-        }
-
-        if (m_sentList.front()->m_retrans)
-        {
-            m_sentList.front()->m_retrans = false;
-            m_retrans -= m_sentList.front()->m_packet->GetSize();
-        }
-
-        if (!m_sentList.front()->m_lost)
-        {
-            m_sentList.front()->m_lost = true;
-            m_lostOut += m_sentList.front()->m_packet->GetSize();
-        }
+        return;
     }
+
+    TcpTxItem* headItem = m_sentBuf.begin()->second;
+    // If the head is sacked (reneging by the receiver the previously sent
+    // information) we revert the sacked flag.
+    // A sacked head means that we should advance SND.UNA.. so it's an error.
+    if (headItem->m_sacked)
+    {
+        headItem->m_sacked = false;
+        m_sackedPkts--;
+        m_sackedOut -= headItem->m_packet->GetSize();
+    }
+
+    if (headItem->m_retrans)
+    {
+        headItem->m_retrans = false;
+        m_retrans -= headItem->m_packet->GetSize();
+    }
+
+    if (!headItem->m_lost)
+    {
+        headItem->m_lost = true;
+        m_lostOut += headItem->m_packet->GetSize();
+        m_totalLost += headItem->m_packet->GetSize();
+    }
+
+    if (headItem->m_tsortedAnchor.has_value())
+    {
+        m_tsortedItemList.erase(headItem->m_tsortedAnchor.value());
+        headItem->m_tsortedAnchor.reset();
+    }
+    headItem->m_rttNotReliable = true;
+
+    m_nextSegLostHint = m_sentBuf.begin();
+
     ConsistencyCheck();
 }
 
@@ -1378,33 +1326,36 @@ void
 TcpTxBuffer::AddRenoSack()
 {
     NS_LOG_FUNCTION(this);
+    std::clog << "unexpected TcpTxBuffer::AddRenoSack()\n";
 
     if (m_sackEnabled)
     {
-        NS_ASSERT(m_sentList.size() > 1);
+        NS_ASSERT(m_sentBuf.size() > 1);
     }
     else
     {
-        NS_ASSERT(!m_sentList.empty());
+        NS_ASSERT(!m_sentBuf.empty());
     }
 
     m_renoSack = true;
 
     // We can _never_ SACK the head, so start from the second segment sent
-    auto it = ++m_sentList.begin();
+    auto it = std::next(m_sentBuf.begin());
 
     // Find the "highest sacked" point, that is SND.UNA + m_sackedOut
-    while (it != m_sentList.end() && (*it)->m_sacked)
+    while (it != m_sentBuf.end() && it->second->m_sacked)
     {
         ++it;
     }
 
     // Add to the sacked size the size of the first "not sacked" segment
-    if (it != m_sentList.end())
+    if (it != m_sentBuf.end())
     {
-        (*it)->m_sacked = true;
-        m_sackedOut += (*it)->m_packet->GetSize();
-        m_highestSack = std::make_pair(it, (*it)->m_startSeq);
+        TcpTxItem* item = it->second;
+        item->m_sacked = true;
+        m_sackedPkts++;
+        m_sackedOut += item->m_packet->GetSize();
+        m_highestSackIter = it;
         NS_LOG_INFO("Added a Reno SACK, status: " << *this);
     }
     else
@@ -1430,19 +1381,20 @@ TcpTxBuffer::ConsistencyCheck() const
     uint32_t lost = 0;
     uint32_t retrans = 0;
 
-    for (auto it = m_sentList.begin(); it != m_sentList.end(); ++it)
+    for (auto it = m_sentBuf.begin(); it != m_sentBuf.end(); ++it)
     {
-        if ((*it)->m_sacked)
+        TcpTxItem* item = it->second;
+        if (item->m_sacked)
         {
-            sacked += (*it)->m_packet->GetSize();
+            sacked += item->m_packet->GetSize();
         }
-        if ((*it)->m_lost)
+        if (item->m_lost)
         {
-            lost += (*it)->m_packet->GetSize();
+            lost += item->m_packet->GetSize();
         }
-        if ((*it)->m_retrans)
+        if (item->m_retrans)
         {
-            retrans += (*it)->m_packet->GetSize();
+            retrans += item->m_packet->GetSize();
         }
     }
 
@@ -1469,11 +1421,12 @@ operator<<(std::ostream& os, const TcpTxBuffer& tcpTxBuf)
     uint32_t appSize = 0;
 
     Ptr<const Packet> p;
-    for (auto it = tcpTxBuf.m_sentList.begin(); it != tcpTxBuf.m_sentList.end(); ++it)
+    for (auto it = tcpTxBuf.m_sentBuf.begin(); it != tcpTxBuf.m_sentBuf.end(); ++it)
     {
-        p = (*it)->GetPacket();
+        TcpTxItem* item = it->second;
+        p = item->GetPacket();
         ss << "{";
-        (*it)->Print(ss);
+        item->Print(ss);
         ss << "}";
         sentSize += p->GetSize();
         beginOfCurrentPacket += p->GetSize();
@@ -1484,7 +1437,7 @@ operator<<(std::ostream& os, const TcpTxBuffer& tcpTxBuf)
         appSize += (*it)->GetPacket()->GetSize();
     }
 
-    os << "Sent list: " << ss.str() << ", size = " << tcpTxBuf.m_sentList.size()
+    os << "Sent list: " << ss.str() << ", size = " << tcpTxBuf.m_sentBuf.size()
        << " Total size: " << tcpTxBuf.m_size << " m_firstByteSeq = " << tcpTxBuf.m_firstByteSeq
        << " m_sentSize = " << tcpTxBuf.m_sentSize << " m_retransOut = " << tcpTxBuf.m_retrans
        << " m_lostOut = " << tcpTxBuf.m_lostOut << " m_sackedOut = " << tcpTxBuf.m_sackedOut;

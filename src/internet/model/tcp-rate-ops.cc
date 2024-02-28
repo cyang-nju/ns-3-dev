@@ -99,6 +99,7 @@ TcpRateLinux::GenerateSample(uint32_t delivered,
     //  auto ack_us = Simulator::Now () - m_rateSample.m_prior_mstamp;
     //  m_rateSample.m_interval = std::max (snd_us, ack_us);
 
+    m_rateSample.m_ackElapsed = Simulator::Now() - m_rateSample.m_priorTime;
     m_rateSample.m_interval = std::max(m_rateSample.m_sendElapsed, m_rateSample.m_ackElapsed);
     m_rateSample.m_delivered = m_rate.m_delivered - m_rateSample.m_priorDelivered;
     NS_LOG_INFO("Updating sample interval=" << m_rateSample.m_interval << " and delivered data"
@@ -155,7 +156,7 @@ TcpRateLinux::CalculateAppLimited(uint32_t cWnd,
         && in_flight < cWnd                   // We are not limited by CWND.
         && lostOut <= retransOut)             // All lost packets have been retransmitted.
     {
-        m_rate.m_appLimited = std::max<uint32_t>(m_rate.m_delivered + in_flight, 1);
+        m_rate.m_appLimited = std::max<uint64_t>(m_rate.m_delivered + in_flight, 1);
         m_rateTrace(m_rate);
     }
 
@@ -181,16 +182,16 @@ TcpRateLinux::SkbDelivered(TcpTxItem* skb)
     m_rate.m_delivered += skb->GetSeqSize();
     m_rate.m_deliveredTime = Simulator::Now();
 
-    if (m_rateSample.m_priorDelivered == 0 || skbInfo.m_delivered > m_rateSample.m_priorDelivered)
+    if (m_rateSample.m_priorDelivered == 0
+        || std::pair{skb->GetLastSent(), skb->GetEndSeq()} > std::pair{m_rate.m_firstSentTime, m_rate.m_lastEndSeq})
     {
-        m_rateSample.m_ackElapsed = Simulator::Now() - skbInfo.m_deliveredTime;
         m_rateSample.m_priorDelivered = skbInfo.m_delivered;
         m_rateSample.m_priorTime = skbInfo.m_deliveredTime;
         m_rateSample.m_isAppLimited = skbInfo.m_isAppLimited;
         m_rateSample.m_sendElapsed = skb->GetLastSent() - skbInfo.m_firstSent;
-
         m_rateSampleTrace(m_rateSample);
 
+        m_rate.m_lastEndSeq = skb->GetEndSeq();
         m_rate.m_firstSentTime = skb->GetLastSent();
     }
 
@@ -198,7 +199,6 @@ TcpRateLinux::SkbDelivered(TcpTxItem* skb)
      * used again when it's cumulatively acked, in case it was SACKed.
      */
     skbInfo.m_deliveredTime = Time::Max();
-    m_rate.m_txItemDelivered = skbInfo.m_delivered;
     m_rateTrace(m_rate);
 }
 
@@ -235,53 +235,6 @@ TcpRateLinux::SkbSent(TcpTxItem* skb, bool isStartOfTransmission)
     skbInfo.m_deliveredTime = m_rate.m_deliveredTime;
     skbInfo.m_isAppLimited = (m_rate.m_appLimited != 0);
     skbInfo.m_delivered = m_rate.m_delivered;
-}
-
-std::ostream&
-operator<<(std::ostream& os, const TcpRateOps::TcpRateConnection& rate)
-{
-    os << "m_delivered      = " << rate.m_delivered << std::endl;
-    os << "m_deliveredTime  = " << rate.m_deliveredTime << std::endl;
-    os << "m_firstSentTime  = " << rate.m_firstSentTime << std::endl;
-    os << "m_appLimited     = " << rate.m_appLimited << std::endl;
-    os << "m_rateDelivered  = " << rate.m_rateDelivered << std::endl;
-    os << "m_rateInterval   = " << rate.m_rateInterval << std::endl;
-    os << "m_rateAppLimited = " << rate.m_rateAppLimited << std::endl;
-    os << "m_txItemDelivered = " << rate.m_txItemDelivered << std::endl;
-    return os;
-}
-
-std::ostream&
-operator<<(std::ostream& os, const TcpRateOps::TcpRateSample& sample)
-{
-    os << "m_deliveryRate  = " << sample.m_deliveryRate << std::endl;
-    os << " m_isAppLimited = " << sample.m_isAppLimited << std::endl;
-    os << " m_interval     = " << sample.m_interval << std::endl;
-    os << " m_delivered    = " << sample.m_delivered << std::endl;
-    os << " m_priorDelivered = " << sample.m_priorDelivered << std::endl;
-    os << " m_priorTime    = " << sample.m_priorTime << std::endl;
-    os << " m_sendElapsed  = " << sample.m_sendElapsed << std::endl;
-    os << " m_ackElapsed   = " << sample.m_ackElapsed << std::endl;
-    os << " m_bytesLoss    = " << sample.m_bytesLoss << std::endl;
-    os << " m_priorInFlight= " << sample.m_priorInFlight << std::endl;
-    os << " m_ackedSacked  = " << sample.m_ackedSacked << std::endl;
-    return os;
-}
-
-bool
-operator==(const TcpRateLinux::TcpRateSample& lhs, const TcpRateLinux::TcpRateSample& rhs)
-{
-    return (lhs.m_deliveryRate == rhs.m_deliveryRate && lhs.m_isAppLimited == rhs.m_isAppLimited &&
-            lhs.m_interval == rhs.m_interval && lhs.m_delivered == rhs.m_delivered &&
-            lhs.m_priorDelivered == rhs.m_priorDelivered && lhs.m_priorTime == rhs.m_priorTime &&
-            lhs.m_sendElapsed == rhs.m_sendElapsed && lhs.m_ackElapsed == rhs.m_ackElapsed);
-}
-
-bool
-operator==(const TcpRateLinux::TcpRateConnection& lhs, const TcpRateLinux::TcpRateConnection& rhs)
-{
-    return (lhs.m_delivered == rhs.m_delivered && lhs.m_deliveredTime == rhs.m_deliveredTime &&
-            lhs.m_firstSentTime == rhs.m_firstSentTime && lhs.m_appLimited == rhs.m_appLimited);
 }
 
 } // namespace ns3

@@ -145,7 +145,7 @@ TcpDctcp::PktsAcked(Ptr<TcpSocketState> tcb, uint32_t segmentsAcked, const Time&
     }
     if (!m_nextSeqFlag)
     {
-        m_nextSeq = tcb->m_nextTxSequence;
+        m_nextSeq = tcb->m_highTxMark;
         m_nextSeqFlag = true;
     }
     if (tcb->m_lastAckedSeq >= m_nextSeq)
@@ -174,7 +174,7 @@ void
 TcpDctcp::Reset(Ptr<TcpSocketState> tcb)
 {
     NS_LOG_FUNCTION(this << tcb);
-    m_nextSeq = tcb->m_nextTxSequence;
+    m_nextSeq = tcb->m_highTxMark;
     m_ackedBytesEcn = 0;
     m_ackedBytesTotal = 0;
 }

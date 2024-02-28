@@ -141,18 +141,15 @@ class TcpRateOps : public Object
         DataRate m_deliveryRate{DataRate("0bps")}; //!< The delivery rate sample
         bool m_isAppLimited{false};    //!< Indicates whether the rate sample is application-limited
         Time m_interval{Seconds(0.0)}; //!< The length of the sampling interval
-        int32_t m_delivered{
-            0}; //!< The amount of data marked as delivered over the sampling interval
-        uint32_t m_priorDelivered{0};   //!< The delivered count of the most recent packet delivered
-        Time m_priorTime{Seconds(0.0)}; //!< The delivered time of the most recent packet delivered
-        Time m_sendElapsed{
-            Seconds(0.0)}; //!< Send time interval calculated from the most recent packet delivered
-        Time m_ackElapsed{
-            Seconds(0.0)}; //!< ACK time interval calculated from the most recent packet delivered
-        uint32_t m_bytesLoss{
-            0}; //!< The amount of data marked as lost from the most recent ack received
+        int32_t m_delivered{0};        //!< The amount of data marked as delivered over the sampling interval
+        uint64_t m_priorDelivered{0};     //!< The delivered count of the most recent packet delivered
+        Time m_priorTime{Seconds(0.0)};   //!< The delivered time of the most recent packet delivered
+        Time m_sendElapsed{Seconds(0.0)}; //!< Send time interval calculated from the most recent packet delivered
+        Time m_ackElapsed{Seconds(0.0)};  //!< ACK time interval calculated from the most recent packet delivered
+        uint32_t m_bytesLoss{0};     //!< The amount of data marked as lost from the most recent ack received
         uint32_t m_priorInFlight{0}; //!< The value if bytes in flight prior to last received ack
-        uint32_t m_ackedSacked{0}; //!< The amount of data acked and sacked in the last received ack
+        uint32_t m_ackedSacked{0};   //!< The amount of data acked and sacked in the last received ack
+        Time m_rtt;
 
         /**
          * \brief Is the sample valid?
@@ -174,17 +171,17 @@ class TcpRateOps : public Object
     {
         uint64_t m_delivered{0};          //!< The total amount of data in bytes delivered so far
         Time m_deliveredTime{Seconds(0)}; //!< Simulator time when m_delivered was last updated
-        Time m_firstSentTime{
-            Seconds(0)}; //!< The send time of the packet that was most recently marked as delivered
-        uint32_t m_appLimited{
-            0}; //!< The index of the last transmitted packet marked as application-limited
-        uint32_t m_txItemDelivered{0}; //!< The value of delivered when the acked item was sent
-        int32_t m_rateDelivered{
-            0}; //!< The amount of data delivered considered to calculate delivery rate.
-        Time m_rateInterval{
-            Seconds(0)}; //!< The value of interval considered to calculate delivery rate.
-        bool m_rateAppLimited{false}; //!< Was sample was taken when data is app limited?
+        SequenceNumber32 m_lastEndSeq{0};
+        Time m_firstSentTime{Seconds(0)}; //!< The send time of the packet that was most recently marked as delivered
+        uint64_t m_appLimited{0};         //!< The index of the last transmitted packet marked as application-limited
+        int32_t m_rateDelivered{0};       //!< The amount of data delivered considered to calculate delivery rate.
+        Time m_rateInterval{Seconds(0)};  //!< The value of interval considered to calculate delivery rate.
+        bool m_rateAppLimited{false};     //!< Was sample was taken when data is app limited?
     };
+
+    // Rate sample related variables
+    TcpRateConnection m_rate;   //!< Rate information
+    TcpRateSample m_rateSample; //!< Rate sample (continuosly updated)
 };
 
 /**
@@ -246,46 +243,10 @@ class TcpRateLinux : public TcpRateOps
     typedef void (*TcpRateSampleUpdated)(const TcpRateSample& sample);
 
   private:
-    // Rate sample related variables
-    TcpRateConnection m_rate;   //!< Rate information
-    TcpRateSample m_rateSample; //!< Rate sample (continuously updated)
-
     TracedCallback<const TcpRateConnection&> m_rateTrace;   //!< Rate trace
     TracedCallback<const TcpRateSample&> m_rateSampleTrace; //!< Rate Sample trace
 };
 
-/**
- * \brief Output operator.
- * \param os The output stream.
- * \param sample the TcpRateLinux::TcpRateSample to print.
- * \returns The output stream.
- */
-std::ostream& operator<<(std::ostream& os, const TcpRateOps::TcpRateSample& sample);
-
-/**
- * \brief Output operator.
- * \param os The output stream.
- * \param rate the TcpRateLinux::TcpRateConnection to print.
- * \returns The output stream.
- */
-std::ostream& operator<<(std::ostream& os, const TcpRateOps::TcpRateConnection& rate);
-
-/**
- * Comparison operator
- * \param lhs left operand
- * \param rhs right operand
- * \return true if the operands are equal
- */
-bool operator==(const TcpRateLinux::TcpRateSample& lhs, const TcpRateLinux::TcpRateSample& rhs);
-
-/**
- * Comparison operator
- * \param lhs left operand
- * \param rhs right operand
- * \return true if the operands are equal
- */
-bool operator==(const TcpRateLinux::TcpRateConnection& lhs,
-                const TcpRateLinux::TcpRateConnection& rhs);
 
 } // namespace ns3
 

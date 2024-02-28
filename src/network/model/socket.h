@@ -76,6 +76,8 @@ class Socket : public Object
     Socket();
     ~Socket() override;
 
+    uint32_t GetTxHash() const;
+
     /**
      * \enum SocketErrno
      * \brief Enumeration of the possible errors returned by a socket.
@@ -180,7 +182,7 @@ class Socket : public Object
      *        completed. The callback is passed  back a pointer to
      *        the same socket object.
      * \param connectionFailed this callback is invoked when the
-     *        connection request initiated by the user is unsuccessfuly
+     *        connection request initiated by the user is unsuccessfully
      *        completed. The callback is passed back a pointer to the
      *        same socket object.
      */
@@ -988,6 +990,8 @@ class Socket : public Object
     virtual void Ipv6LeaveGroup();
 
   protected:
+    void GenerateTxRandomHash();
+
     /**
      * \brief Notify through the callback (if set) that the connection has been
      *        established.
@@ -1112,6 +1116,8 @@ class Socket : public Object
 
     uint8_t m_ipv6Tclass;   //!< the socket IPv6 Tclass
     uint8_t m_ipv6HopLimit; //!< the socket IPv6 Hop Limit
+
+    uint32_t m_txHash;
 };
 
 /**

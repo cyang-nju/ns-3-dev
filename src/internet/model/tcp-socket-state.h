@@ -27,6 +27,8 @@
 namespace ns3
 {
 
+class TcpRateOps;
+
 /**
  * \brief Data structure that records the congestion state of a connection
  *
@@ -52,10 +54,7 @@ class TcpSocketState : public Object
     /**
      * \brief TcpSocketState Constructor
      */
-    TcpSocketState()
-        : Object()
-    {
-    }
+    TcpSocketState();
 
     /**
      * \brief Copy constructor.
@@ -198,16 +197,26 @@ class TcpSocketState : public Object
 
     // Pacing related variables
     bool m_pacing{false};                  //!< Pacing status
+    bool m_paceInitialWindow{false};       //!< Enable/Disable pacing for the initial window
     DataRate m_maxPacingRate{0};           //!< Max Pacing rate
     TracedValue<DataRate> m_pacingRate{0}; //!< Current Pacing rate
     uint16_t m_pacingSsRatio{0};           //!< SS pacing ratio
     uint16_t m_pacingCaRatio{0};           //!< CA pacing ratio
-    bool m_paceInitialWindow{false};       //!< Enable/Disable pacing for the initial window
+    
+    Time m_txTimestamp{0};
+    uint64_t m_totalLost{0};
+    Ptr<TcpRateOps> m_rateOps;                 //!< Rate operations
 
-    Time m_minRtt{Time::Max()}; //!< Minimum RTT observed throughout the connection
+    // RTT estimation
+    TracedValue<Time> m_sRtt{0};  //!< Smoothed Round Trip Time
+    Time m_minRtt{Time::Max()};   //!< Minimum RTT observed throughout the connection
+    Time m_rttMeanDev{0};         //!< Mean deviation
+    Time m_rttMeanDevMax{0};      //!< Maximal `m_rttMeanDev` for the last rtt period
+    Time m_rttVariation{0};       //!< Smoothed `m_rttMeanDevMax`
+    SequenceNumber32 m_rttSeq{0}; //!< Sequence number to update rttvar
+    Time m_synSentTime{Time::Min()};
 
     TracedValue<uint32_t> m_bytesInFlight{0};  //!< Bytes in flight
-    TracedValue<Time> m_lastRtt{Seconds(0.0)}; //!< Last RTT sample collected
 
     Ptr<TcpRxBuffer> m_rxBuffer; //!< Rx buffer (reordering buffer)
 
@@ -215,10 +224,6 @@ class TcpSocketState : public Object
     UseEcn_t m_useEcn{Off};          //!< Socket ECN capability
 
     EcnCodePoint_t m_ectCodePoint{Ect0}; //!< ECT code point to use
-
-    uint32_t m_lastAckedSackedBytes{
-        0}; //!< The number of bytes acked and sacked as indicated by the current ACK received. This
-            //!< is similar to acked_sacked variable in Linux
 
     /**
      * \brief Get cwnd in segments rather than bytes

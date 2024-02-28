@@ -15,6 +15,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #include "tcp-socket-state.h"
+#include "ns3/tcp-rate-ops.h"
 
 namespace ns3
 {
@@ -92,9 +93,14 @@ TcpSocketState::GetTypeId()
                             "ns3::TracedValueCallback::Uint32")
             .AddTraceSource("RTT",
                             "Last RTT sample",
-                            MakeTraceSourceAccessor(&TcpSocketState::m_lastRtt),
+                            MakeTraceSourceAccessor(&TcpSocketState::m_sRtt),
                             "ns3::TracedValueCallback::Time");
     return tid;
+}
+
+TcpSocketState::TcpSocketState()
+    : Object()
+{
 }
 
 TcpSocketState::TcpSocketState(const TcpSocketState& other)
@@ -112,18 +118,17 @@ TcpSocketState::TcpSocketState(const TcpSocketState& other)
       m_rcvTimestampValue(other.m_rcvTimestampValue),
       m_rcvTimestampEchoReply(other.m_rcvTimestampEchoReply),
       m_pacing(other.m_pacing),
+      m_paceInitialWindow(other.m_paceInitialWindow),
       m_maxPacingRate(other.m_maxPacingRate),
       m_pacingRate(other.m_pacingRate),
       m_pacingSsRatio(other.m_pacingSsRatio),
       m_pacingCaRatio(other.m_pacingCaRatio),
-      m_paceInitialWindow(other.m_paceInitialWindow),
+      m_sRtt(other.m_sRtt),
       m_minRtt(other.m_minRtt),
       m_bytesInFlight(other.m_bytesInFlight),
-      m_lastRtt(other.m_lastRtt),
       m_ecnMode(other.m_ecnMode),
       m_useEcn(other.m_useEcn),
-      m_ectCodePoint(other.m_ectCodePoint),
-      m_lastAckedSackedBytes(other.m_lastAckedSackedBytes)
+      m_ectCodePoint(other.m_ectCodePoint)
 
 {
 }

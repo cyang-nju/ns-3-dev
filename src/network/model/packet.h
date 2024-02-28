@@ -32,6 +32,7 @@
 #include "ns3/callback.h"
 #include "ns3/mac48-address.h"
 #include "ns3/ptr.h"
+#include "ns3/nstime.h"
 
 #include <stdint.h>
 
@@ -40,6 +41,7 @@ namespace ns3
 
 // Forward declaration
 class Address;
+class Socket;
 
 /**
  * \ingroup network
@@ -716,6 +718,20 @@ class Packet : public SimpleRefCount<Packet>
      */
     Ptr<NixVector> GetNixVector() const;
 
+
+
+    void SetSocket(Socket* sock);
+
+    Socket* GetSocket() const;
+
+    Socket* TakeSocketInfo();
+
+    void SetTxTime(Time t);
+
+    Time GetTxTime() const;
+
+    Time TakeTxTime();
+
     /**
      * TracedCallback signature for Ptr<Packet>
      *
@@ -791,6 +807,8 @@ class Packet : public SimpleRefCount<Packet>
     ByteTagList m_byteTagList;     //!< the ByteTag list
     PacketTagList m_packetTagList; //!< the packet's Tag list
     PacketMetadata m_metadata;     //!< the packet's metadata
+    Socket* m_sock{nullptr};
+    Time m_txTime{0};
 
     /* Please see comments above about nix-vector */
     mutable Ptr<NixVector> m_nixVector; //!< the packet's Nix vector
