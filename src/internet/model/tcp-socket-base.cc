@@ -1724,8 +1724,9 @@ TcpSocketBase::EnterRecovery(uint32_t currentDelivered)
     // (4.2) ssthresh = cwnd = (FlightSize / 2)
     // If SACK is not enabled, still consider the head as 'in flight' for
     // compatibility with old ns-3 versions
+    uint32_t headSize = m_txBuffer->GetHeadItem()->GetSeqSize();
     uint32_t bytesInFlight =
-        m_sackEnabled ? BytesInFlight() : BytesInFlight() + m_tcb->m_segmentSize;
+        m_sackEnabled ? BytesInFlight() : BytesInFlight() + headSize;
     m_tcb->m_ssThresh = m_congestionControl->GetSsThresh(m_tcb, bytesInFlight);
 
     if (!m_congestionControl->HasCongControl())
@@ -1734,7 +1735,7 @@ TcpSocketBase::EnterRecovery(uint32_t currentDelivered)
     }
 
     // (4.3) Retransmit the first data segment presumed dropped
-    uint32_t sz = SendDataPacket(m_highRxAckMark, m_tcb->m_segmentSize, true);
+    uint32_t sz = SendDataPacket(m_highRxAckMark, headSize, true);
     NS_ASSERT_MSG(sz > 0, "SendDataPacket returned zero, indicating zero bytes were sent");
     // (4.4) Run SetPipe ()
     // (4.5) Proceed to step (C)
