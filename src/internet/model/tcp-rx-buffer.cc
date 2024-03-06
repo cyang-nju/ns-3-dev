@@ -292,7 +292,7 @@ TcpRxBuffer::UpdateSackList(const SequenceNumber32& seq, const SequenceNumber32&
     for (uint32_t i = 0; i < m_sackList.size(); i++) {
         if (seq <= m_sackList[i].second && m_sackList[i].first <= endSeq) {
             m_sackList[i].first = std::min(m_sackList[i].first, seq);
-            m_sackList[i].second = std::min(m_sackList[i].second, endSeq);
+            m_sackList[i].second = std::max(m_sackList[i].second, endSeq);
 
             // Rotate this_sack to the first one.
             for (; i > 0; i--) {
@@ -306,7 +306,7 @@ TcpRxBuffer::UpdateSackList(const SequenceNumber32& seq, const SequenceNumber32&
             while (it != m_sackList.end()) {
                 if (it->first <= m_sackList[0].second && m_sackList[0].first <= it->second) {
                     m_sackList[0].first = std::min(m_sackList[0].first, it->first);
-                    m_sackList[0].second = std::min(m_sackList[0].second, it->second);
+                    m_sackList[0].second = std::max(m_sackList[0].second, it->second);
                     it = m_sackList.erase(it);
                     continue;
                 }
