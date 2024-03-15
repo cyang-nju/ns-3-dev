@@ -1,0 +1,31 @@
+{
+    "n": 2,
+
+    "foo": {
+        "bar": "hello"
+    },
+
+    "LinkRate": "10Gbps",
+    "LinkDelay": "10ms",
+
+    "ConfigDefault": {
+        "ns3::TcpSocket": {
+            "SegmentSize": 1448,
+            "SndBufSize": 256000000,
+            "RcvBufSize": 256000000,
+            "DelAckCount": 0,
+        },
+        "ns3::TcpSocketBase": {
+            "Timestamp": true,
+            "MaxSegLifetime": 1e-9 // TIME_WAIT
+        },
+        "ns3::TcpSocketState": {
+            "MaxPacingRate": "40Gbps",
+            "EnablePacing": true,
+            "PaceInitialWindow": false
+        },
+        "ns3::DropTailQueue<Packet>": {
+            "MaxSize": "1p"
+        },
+    },
+}
