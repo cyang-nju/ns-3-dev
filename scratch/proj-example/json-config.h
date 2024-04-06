@@ -52,18 +52,18 @@ std::optional<T> GetOrNull(ConfigPath path) {
 
 
 
-inline bool Contains(std::string_view key) { return Contains({key}); }
-inline bool GetBool(std::string_view key) { return GetBool({key}); }
-inline uint64_t GetUInt(std::string_view key) { return GetUInt({key}); }
-inline double GetDouble(std::string_view key) { return GetDouble({key}); }
-inline std::string GetString(std::string_view key) { return GetString({key}); }
-template <class T> T Get(std::string_view key) { return Get<T>({key}); }
+inline bool Contains(std::string_view key) { return Contains(std::vector{key}); }
+inline bool GetBool(std::string_view key) { return GetBool(std::vector{key}); }
+inline uint64_t GetUInt(std::string_view key) { return GetUInt(std::vector{key}); }
+inline double GetDouble(std::string_view key) { return GetDouble(std::vector{key}); }
+inline std::string GetString(std::string_view key) { return GetString(std::vector{key}); }
+template <class T> T Get(std::string_view key) { return Get<T>(std::vector{key}); }
 
-inline std::optional<bool> GetBoolOrNull(std::string_view key) { return GetBoolOrNull({key}); }
-inline std::optional<uint64_t> GetUIntOrNull(std::string_view key) { return GetUIntOrNull({key}); }
-inline std::optional<double> GetDoubleOrNull(std::string_view key) { return GetDoubleOrNull({key}); }
-inline std::optional<std::string> GetStringOrNull(std::string_view key) { return GetStringOrNull({key}); }
-template <class T> std::optional<T> GetOrNull(std::string_view key) { return GetOrNull<T>({key}); }
+inline std::optional<bool> GetBoolOrNull(std::string_view key) { return GetBoolOrNull(std::vector{key}); }
+inline std::optional<uint64_t> GetUIntOrNull(std::string_view key) { return GetUIntOrNull(std::vector{key}); }
+inline std::optional<double> GetDoubleOrNull(std::string_view key) { return GetDoubleOrNull(std::vector{key}); }
+inline std::optional<std::string> GetStringOrNull(std::string_view key) { return GetStringOrNull(std::vector{key}); }
+template <class T> std::optional<T> GetOrNull(std::string_view key) { return GetOrNull<T>(std::vector{key}); }
 
 
 inline ns3::BooleanValue GetBoolValue(ConfigPath path)  { return ns3::BooleanValue{GetBool(path)}; }
@@ -71,9 +71,9 @@ inline ns3::UintegerValue GetUIntValue(ConfigPath path) { return ns3::UintegerVa
 inline ns3::DoubleValue GetDoubleValue(ConfigPath path) { return ns3::DoubleValue{GetDouble(path)}; }
 inline ns3::StringValue GetStringValue(ConfigPath path) { return ns3::StringValue{GetString(path)}; }
 
-inline ns3::BooleanValue GetBoolValue(std::string_view key)  { return ns3::BooleanValue{GetBool({key})}; }
-inline ns3::UintegerValue GetUIntValue(std::string_view key) { return ns3::UintegerValue{GetUInt({key})}; }
-inline ns3::DoubleValue GetDoubleValue(std::string_view key) { return ns3::DoubleValue{GetDouble({key})}; }
-inline ns3::StringValue GetStringValue(std::string_view key) { return ns3::StringValue{GetString({key})}; }
+inline ns3::BooleanValue GetBoolValue(std::string_view key)  { return ns3::BooleanValue{GetBool(std::vector{key})}; }
+inline ns3::UintegerValue GetUIntValue(std::string_view key) { return ns3::UintegerValue{GetUInt(std::vector{key})}; }
+inline ns3::DoubleValue GetDoubleValue(std::string_view key) { return ns3::DoubleValue{GetDouble(std::vector{key})}; }
+inline ns3::StringValue GetStringValue(std::string_view key) { return ns3::StringValue{GetString(std::vector{key})}; }
 
 } // namespace JsonConfig
