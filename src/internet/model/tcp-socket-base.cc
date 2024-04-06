@@ -565,6 +565,7 @@ TcpSocketBase::Bind(const Address& address)
         InetSocketAddress transport = InetSocketAddress::ConvertFrom(address);
         Ipv4Address ipv4 = transport.GetIpv4();
         uint16_t port = transport.GetPort();
+        SetIpTos(transport.GetTos());
         if (ipv4 == Ipv4Address::GetAny() && port == 0)
         {
             m_endPoint = m_tcp->Allocate();
@@ -679,6 +680,7 @@ TcpSocketBase::Connect(const Address& address)
         }
         InetSocketAddress transport = InetSocketAddress::ConvertFrom(address);
         m_endPoint->SetPeer(transport.GetIpv4(), transport.GetPort());
+        SetIpTos(transport.GetTos());
         m_endPoint6 = nullptr;
 
         // Get the appropriate local address and port number from the routing protocol and set up
@@ -3321,7 +3323,7 @@ TcpSocketBase::SendPendingData(bool withAck)
         // loop again!
     }
 
-    bool isCwndLimited = (m_tcb->m_bytesInFlight.Get() >= m_tcb->m_cWnd.Get());
+    bool isCwndLimited = (m_tcb->m_bytesInFlight.Get() + m_tcb->m_segmentSize > m_tcb->m_cWnd.Get());
     if (nPacketsSent > 0 || isCwndLimited) {
         if (m_tcb->m_lastAckedSeq >= m_cwndUsageSeq || isCwndLimited) {
             m_isCwndLimited = isCwndLimited;
@@ -4400,9 +4402,15 @@ TcpSocketBase::IsPacingEnabled() const
         {
             return true;
         }
+
         SequenceNumber32 highTxMark = m_tcb->m_highTxMark; // cast traced value
         if (highTxMark.GetValue() > (GetInitialCwnd() * m_tcb->m_segmentSize))
         {
+            // issue: when sequence wrap-around happens, false is returned for `m_tcb->m_initialCWnd` packets.
+            
+            // TODO: this is a temporary fix to bypass the issue.
+            // A stats of total bytes sent out (type uint64_t) is needed.
+            m_tcb->m_paceInitialWindow = true;
             return true;
         }
     }
