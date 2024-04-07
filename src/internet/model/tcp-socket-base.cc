@@ -1667,7 +1667,7 @@ void
 TcpSocketBase::EnterCwr(uint32_t currentDelivered)
 {
     NS_LOG_FUNCTION(this << currentDelivered);
-    m_tcb->m_ssThresh = m_congestionControl->GetSsThresh(m_tcb, BytesInFlight());
+    m_tcb->m_ssThresh = std::max(m_congestionControl->GetSsThresh(m_tcb, BytesInFlight()), 2 * m_tcb->m_segmentSize);
     NS_LOG_DEBUG("Reduce ssThresh to " << m_tcb->m_ssThresh);
     // Do not update m_cWnd, under assumption that recovery process will
     // gradually bring it down to m_ssThresh.  Update the 'inflated' value of
@@ -1727,9 +1727,8 @@ TcpSocketBase::EnterRecovery(uint32_t currentDelivered)
     // If SACK is not enabled, still consider the head as 'in flight' for
     // compatibility with old ns-3 versions
     uint32_t headSize = m_txBuffer->GetHeadItem()->GetSeqSize();
-    uint32_t bytesInFlight =
-        m_sackEnabled ? BytesInFlight() : BytesInFlight() + headSize;
-    m_tcb->m_ssThresh = m_congestionControl->GetSsThresh(m_tcb, bytesInFlight);
+    uint32_t bytesInFlight = m_sackEnabled ? BytesInFlight() : BytesInFlight() + headSize;
+    m_tcb->m_ssThresh = std::max(m_congestionControl->GetSsThresh(m_tcb, bytesInFlight), 2 * m_tcb->m_segmentSize);
 
     if (!m_congestionControl->HasCongControl())
     {
@@ -1856,13 +1855,7 @@ TcpSocketBase::ReceivedAck(Ptr<Packet> packet, const TcpHeader& tcpHeader)
             m_congestionControl->IncreaseWindow(m_tcb, segsAcked);
         }
     }
-    if (m_tcb->m_cWnd.Get() < m_tcb->m_segmentSize) {
-        std::cerr << "unexpected low cwnd=" << m_tcb->m_cWnd.Get()
-            << ", ssthresh=" << m_tcb->m_ssThresh.Get()
-            << ", state=" << m_tcb->m_congState.Get()
-            << std::endl;
-        m_tcb->m_cWnd = m_tcb->m_segmentSize;
-    }
+    
     UpdatePacingRate();
     m_tcb->m_isRetransDataAcked = false;
 
@@ -3653,7 +3646,7 @@ TcpSocketBase::ReTxTimeout()
     // retransmission timer, decrease ssThresh
     if (m_tcb->m_congState != TcpSocketState::CA_LOSS || !m_txBuffer->IsHeadRetransmitted())
     {
-        m_tcb->m_ssThresh = m_congestionControl->GetSsThresh(m_tcb, inFlightBeforeRto);
+        m_tcb->m_ssThresh = std::max(m_congestionControl->GetSsThresh(m_tcb, inFlightBeforeRto), 2 * m_tcb->m_segmentSize);
     }
 
     // Cwnd set to 1 MSS
@@ -4402,11 +4395,11 @@ TcpSocketBase::IsPacingEnabled() const
         {
             return true;
         }
-
         SequenceNumber32 highTxMark = m_tcb->m_highTxMark; // cast traced value
         if (highTxMark.GetValue() > (GetInitialCwnd() * m_tcb->m_segmentSize))
         {
-            // issue: when sequence wrap-around happens, false is returned for `m_tcb->m_initialCWnd` packets.
+            // issue: when sequence wrap-around happens, false is returned
+            //        until highTxMark is larger than initial cwnd again.
             
             // TODO: this is a temporary fix to bypass the issue.
             // A stats of total bytes sent out (type uint64_t) is needed.
@@ -4460,8 +4453,7 @@ TcpSocketBase::UpdatePacingRate()
 
     uint32_t wnd = std::max(m_tcb->m_cWnd.Get(), m_tcb->m_bytesInFlight.Get());
     // Multiply by 8 to convert from bytes per second to bits per second
-    DataRate pacingRate((std::max(wnd, m_tcb->m_segmentSize * 2) * 8 * factor) /
-                        m_tcb->m_sRtt.Get().GetSeconds());
+    DataRate pacingRate((wnd * 8 * factor) / m_tcb->m_sRtt.Get().GetSeconds());
     if (pacingRate < m_tcb->m_maxPacingRate)
     {
         NS_LOG_DEBUG("Pacing rate updated to: " << pacingRate);
