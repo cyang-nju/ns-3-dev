@@ -416,7 +416,7 @@ void TcpBbr::UpdateGains() {
         break;
     case BBR_DRAIN:
         m_pacingGain = DRAIN_GAIN;
-        m_cwndGain = DRAIN_GAIN;
+        m_cwndGain = HIGH_GAIN;    // keep cwnd
         break;
     case BBR_PROBE_BW:
         if (m_ltUseBw) {
