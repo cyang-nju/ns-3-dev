@@ -83,7 +83,7 @@ class TcpBbr : public TcpCongestionOps
     };
 
     typedef WindowedFilter<DataRate,
-                           MaxFilter<DataRate>,
+                           std::greater<>,
                            uint32_t,
                            uint32_t>
         MaxBandwidthFilter_t; //!< Definition of max bandwidth filter.
