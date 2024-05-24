@@ -39,12 +39,7 @@ TcpPrrRecovery::GetTypeId()
         TypeId("ns3::TcpPrrRecovery")
             .SetParent<TcpClassicRecovery>()
             .AddConstructor<TcpPrrRecovery>()
-            .SetGroupName("Internet")
-            .AddAttribute("ReductionBound",
-                          "Type of Reduction Bound",
-                          EnumValue(SSRB),
-                          MakeEnumAccessor<ReductionBound_t>(&TcpPrrRecovery::m_reductionBoundMode),
-                          MakeEnumChecker(CRB, "CRB", SSRB, "SSRB"));
+            .SetGroupName("Internet");
     return tid;
 }
 
@@ -58,8 +53,7 @@ TcpPrrRecovery::TcpPrrRecovery(const TcpPrrRecovery& recovery)
     : TcpClassicRecovery(recovery),
       m_prrDelivered(recovery.m_prrDelivered),
       m_prrOut(recovery.m_prrOut),
-      m_recoveryFlightSize(recovery.m_recoveryFlightSize),
-      m_reductionBoundMode(recovery.m_reductionBoundMode)
+      m_priorCwnd(recovery.m_priorCwnd)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -79,8 +73,7 @@ TcpPrrRecovery::EnterRecovery(Ptr<TcpSocketState> tcb,
 
     m_prrOut = 0;
     m_prrDelivered = 0;
-    m_recoveryFlightSize = unAckDataCount;
-
+    m_priorCwnd = std::max(tcb->m_cWnd.Get(), tcb->m_segmentSize);
     DoRecovery(tcb, deliveredBytes);
 }
 
@@ -91,32 +84,24 @@ TcpPrrRecovery::DoRecovery(Ptr<TcpSocketState> tcb, uint32_t deliveredBytes)
     m_prrDelivered += deliveredBytes;
 
     int sendCount;
-    if (tcb->m_bytesInFlight > tcb->m_ssThresh)
+    if (tcb->m_bytesInFlight.Get() > tcb->m_ssThresh.Get())
     {
-        sendCount =
-            std::ceil(m_prrDelivered * tcb->m_ssThresh * 1.0 / m_recoveryFlightSize) - m_prrOut;
+        // ceil of (m_prrDelivered * tcb->m_ssThresh.Get() / m_priorCwnd) minus m_prrOut
+        sendCount = (m_prrDelivered * tcb->m_ssThresh.Get() + m_priorCwnd - 1) / m_priorCwnd - m_prrOut;
     }
     else
     {
-        int limit = static_cast<int>(tcb->m_ssThresh - tcb->m_bytesInFlight);
-        if (m_reductionBoundMode == CRB)
+        int limit = std::max((int)m_prrDelivered - (int)m_prrOut, (int)deliveredBytes);
+        if (tcb->m_isRetransDataAcked)
         {
-            limit = m_prrDelivered - m_prrOut;
+            limit += tcb->m_segmentSize;
         }
-        else if (m_reductionBoundMode == SSRB)
-        {
-            limit = std::max(m_prrDelivered - m_prrOut, deliveredBytes);
-            if (tcb->m_isRetransDataAcked)
-            {
-                limit += tcb->m_segmentSize;
-            }
-        }
-        sendCount = std::min(limit, static_cast<int>(tcb->m_ssThresh - tcb->m_bytesInFlight));
+        sendCount = std::min(limit, static_cast<int>(tcb->m_ssThresh.Get() - tcb->m_bytesInFlight.Get()));
     }
 
     /* Force a fast retransmit upon entering fast recovery */
     sendCount = std::max(sendCount, static_cast<int>(m_prrOut > 0 ? 0 : tcb->m_segmentSize));
-    tcb->m_cWnd = tcb->m_bytesInFlight + sendCount;
+    tcb->m_cWnd = std::max(tcb->m_bytesInFlight.Get() + sendCount, tcb->m_segmentSize);
     tcb->m_cWndInfl = tcb->m_cWnd;
 }
 

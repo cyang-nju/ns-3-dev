@@ -4452,6 +4452,7 @@ TcpSocketBase::UpdatePacingRate()
     }
 
     uint32_t wnd = std::max(m_tcb->m_cWnd.Get(), m_tcb->m_bytesInFlight.Get());
+    wnd = std::max(wnd, m_tcb->m_segmentSize);
     // Multiply by 8 to convert from bytes per second to bits per second
     DataRate pacingRate((wnd * 8 * factor) / m_tcb->m_sRtt.Get().GetSeconds());
     if (pacingRate < m_tcb->m_maxPacingRate)
