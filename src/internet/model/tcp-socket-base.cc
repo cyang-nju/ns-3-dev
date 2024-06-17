@@ -1734,13 +1734,6 @@ TcpSocketBase::EnterRecovery(uint32_t currentDelivered)
     {
         m_recoveryOps->EnterRecovery(m_tcb, 3, UnAckDataCount(), currentDelivered);
     }
-
-    // (4.3) Retransmit the first data segment presumed dropped
-    uint32_t sz = SendDataPacket(m_highRxAckMark, headSize, true);
-    NS_ASSERT_MSG(sz > 0, "SendDataPacket returned zero, indicating zero bytes were sent");
-    // (4.4) Run SetPipe ()
-    // (4.5) Proceed to step (C)
-    // these steps are done after the ProcessAck function (SendPendingData)
 }
 
 /* Process the newly received ACK */
@@ -1839,9 +1832,6 @@ TcpSocketBase::ReceivedAck(Ptr<Packet> packet, const TcpHeader& tcpHeader)
     if (m_tcb->m_congState == TcpSocketState::CA_RECOVERY) {
         if (!m_congestionControl->HasCongControl() && currentDelivered > 0) {
             m_recoveryOps->DoRecovery(m_tcb, currentDelivered);
-        }
-        if (ackNumber > oldHeadSequence && !m_txBuffer->IsRetransmittedDataAcked(ackNumber + m_tcb->m_segmentSize)) {
-            DoRetransmit(); // Assume the next seq is lost. Retransmit lost packet
         }
     } else if (m_tcb->m_congState == TcpSocketState::CA_CWR) {
         if (!m_congestionControl->HasCongControl() && currentDelivered > 0) {

@@ -1087,12 +1087,6 @@ class TcpSocketBase : public TcpSocket
      */
     virtual void PersistTimeout();
 
-    /**
-     * \brief Retransmit the first segment marked as lost, without considering
-     * available window nor pacing.
-     */
-    void DoRetransmit();
-
     /** \brief Add options to TcpHeader
      *
      * Test each option, and if it is enabled on our side, add it
